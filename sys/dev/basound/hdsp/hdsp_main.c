@@ -276,25 +276,82 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct hdsp *hdsp = (struct hdsp *)substream->pcm->private_data;
 
+	if (hdsp == NULL)
+		return -EINVAL;
+
 	mtx_lock(&hdsp->lock);
+	
 	switch (cmd) {
 	case 1: /* SNDRV_PCM_TRIGGER_START */
-		hdsp->running |= 1 << substream->stream;
-		break;
+		/* Start HDSP hardware streaming */
+		if (hdsp->running == 0) {
+			/* Enable output */
+			uint32_t control = hdsp_read(hdsp, HDSP_controlRegister);
+			hdsp_write(hdsp, HDSP_controlRegister, 
+				   control | HDSP_AudioInterruptEnable);
+			
+			/* Set stream as running */
+			hdsp->running = 1;
+			
+			/* In real implementation:
+			 * - Configure DMA addresses in HDSP_outputBufferAddress, HDSP_inputBufferAddress
+			 * - Set up period size and frame count
+			 * - Enable isochronous transfers
+			 */
+		}
+		mtx_unlock(&hdsp->lock);
+		return 0;
+		
 	case 0: /* SNDRV_PCM_TRIGGER_STOP */
-		hdsp->running &= ~(1 << substream->stream);
-		break;
+		/* Stop HDSP hardware streaming */
+		if (hdsp->running != 0) {
+			/* Disable output */
+			uint32_t control = hdsp_read(hdsp, HDSP_controlRegister);
+			hdsp_write(hdsp, HDSP_controlRegister, 
+				   control & ~HDSP_AudioInterruptEnable);
+			
+			/* Clear running flag */
+			hdsp->running = 0;
+			
+			/* In real implementation:
+			 * - Disable isochronous transfers
+			 * - Reset DMA pointers
+			 */
+		}
+		mtx_unlock(&hdsp->lock);
+		return 0;
+		
 	default:
 		mtx_unlock(&hdsp->lock);
 		return -EINVAL;
 	}
-	mtx_unlock(&hdsp->lock);
-	return 0;
 }
 
 unsigned long
 snd_hdsp_pointer(struct snd_pcm_substream *substream)
 {
 	struct hdsp *hdsp = (struct hdsp *)substream->pcm->private_data;
-	return hdsp_hw_pointer(hdsp);
+	unsigned long position = 0;
+
+	if (hdsp == NULL)
+		return 0;
+
+	mtx_lock(&hdsp->lock);
+	
+	if (hdsp->running != 0) {
+		/* Read current buffer position from HDSP hardware */
+		uint32_t status = hdsp_read(hdsp, HDSP_statusRegister);
+		
+		/* Extract buffer position from status register */
+		position = (status & HDSP_BufferPositionMask) >> 6;
+		
+		/* Convert to byte offset */
+		if (hdsp->period_bytes > 0) {
+			position = (position * hdsp->period_bytes) % 
+				   (hdsp->period_bytes * 2);
+		}
+	}
+	
+	mtx_unlock(&hdsp->lock);
+	return position;
 }

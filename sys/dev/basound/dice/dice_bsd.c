@@ -377,7 +377,7 @@ dice_bsd_attach(device_t dev)
 	strlcpy(card->driver, "basound_dice", sizeof(card->driver));
 	strlcpy(card->shortname, "DICE FireWire", sizeof(card->shortname));
 	snprintf(card->longname, sizeof(card->longname),
-		"DICE FireWire at 0x%x", fwdev->eui.eui64);
+		"DICE FireWire audio interface");
 	
 	/* Create PCM device */
 	err = snd_pcm_new(card, "DICE Audio", 0, 1, 1, &pcm);
@@ -388,8 +388,8 @@ dice_bsd_attach(device_t dev)
 	}
 	
 	pcm->private_data = sc;
-	pcm->stream[SNDRV_PCM_STREAM_PLAYBACK].substream->ops = &dice_pcm_ops;
-	pcm->stream[SNDRV_PCM_STREAM_CAPTURE].substream->ops = &dice_pcm_ops;
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &dice_pcm_ops);
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &dice_pcm_ops);
 	
 	/* Create MIDI device */
 	err = snd_rawmidi_new(card, "DICE MIDI", 0, 1, 1, NULL);
@@ -414,119 +414,17 @@ fail:
 	audio_stream_destroy(&sc->capture_stream);
 	return ENXIO;
 }
-{
-	struct dice_bsd_softc *sc;
-	struct firewire_dev_comm *fdc;
-	struct fw_device *fwdev;
-	struct snd_card *card;
-	struct device alsa_dev;
-	int err;
-
-	fdc = device_get_softc(dev);
-	if (fdc == NULL)
-		return ENXIO;
-
-	fwdev = (struct fw_device *)device_get_ivars(dev);
-	if (fwdev == NULL)
-		return ENXIO;
-
-	sc = malloc(sizeof(*sc), M_DICE_BSD, M_WAITOK | M_ZERO);
-	if (sc == NULL)
-		return ENOMEM;
-
-	sc->dev = dev;
-	sc->fwdev = fwdev;
-	device_set_softc(dev, sc);
-
-	/* Create ALSA device wrapper for FreeBSD device_t */
-	alsa_dev.bsddev = dev;
-
-	/* Create ALSA sound card */
-	err = snd_card_new(&alsa_dev, -1, "DICE", NULL, 0, &card);
-	if (err < 0) {
-		device_printf(dev, "Failed to create sound card: %d\n", err);
-		free(sc, M_DICE_BSD);
-		return ENOMEM;
-	}
-
-	/* Set card description */
-	snprintf(card->shortname, sizeof(card->shortname), "DICE (vendor 0x%06x)",
-	    fwdev->csrrom[3] >> 8);
-
-	/* Create PCM device with 1 playback and 1 capture stream (basic configuration) */
-	struct snd_pcm *pcm;
-	struct snd_pcm_substream *substream;
-	int i;
-	
-	err = snd_pcm_new(card, "DICE PCM", 0, 1, 1, &pcm);
-	if (err < 0) {
-		device_printf(dev, "Failed to create PCM: %d\n", err);
-		snd_card_free(card);
-		free(sc, M_DICE_BSD);
-		return ENXIO;
-	}
-
-	/* Set PCM operations for both directions */
-	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &dice_pcm_ops);
-	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &dice_pcm_ops);
-
-	/* Initialize runtime for each substream */
-	for (i = 0; i < 2; i++) {
-		struct snd_pcm_str *pstr = &pcm->streams[i];
-		for (int j = 0; j < pstr->substream_count; j++) {
-			substream = &pstr->substream[j];
-			substream->runtime = malloc(sizeof(*substream->runtime), M_ALSA, M_WAITOK | M_ZERO);
-			if (substream->runtime == NULL) {
-				device_printf(dev, "Failed to allocate PCM runtime\n");
-				snd_card_free(card);
-				free(sc, M_DICE_BSD);
-				return ENOMEM;
-			}
-		}
-	}
-
-	/* Create MIDI device (optional - many DICE devices have MIDI I/O) */
-	struct snd_rawmidi *rmidi;
-	err = snd_rawmidi_new(card, "DICE MIDI", 0, 1, 1, &rmidi);
-	if (err < 0) {
-		device_printf(dev, "Failed to create MIDI device (non-fatal): %d\n", err);
-		/* MIDI is optional, so don't fail entirely */
-	} else {
-		snprintf(rmidi->name, sizeof(rmidi->name), "DICE MIDI");
-	}
-
-	/* Register the card with FreeBSD sound system */
-	err = snd_card_register(card);
-	if (err < 0) {
-		device_printf(dev, "Failed to register sound card: %d\n", err);
-		snd_card_free(card);
-		free(sc, M_DICE_BSD);
-		return ENXIO;
-	}
-
-	sc->alsa_dice = card;
-
-	device_printf(dev, "DICE FireWire device attached - PCM registered\n");
-
-	return 0;
-}
 
 static int
 dice_bsd_detach(device_t dev)
 {
-	struct dice_bsd_softc *sc;
-	struct snd_card *card;
-
-	sc = device_get_softc(dev);
-	if (sc == NULL)
-		return 0;
-
-	if (sc->alsa_dice != NULL) {
-		card = (struct snd_card *)sc->alsa_dice;
-		snd_card_free(card);
+	struct dice_bsd_softc *sc = device_get_softc(dev);
+	
+	if (sc != NULL) {
+		audio_stream_destroy(&sc->playback_stream);
+		audio_stream_destroy(&sc->capture_stream);
 	}
-
-	free(sc, M_DICE_BSD);
+	
 	return 0;
 }
 

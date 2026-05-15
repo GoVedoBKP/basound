@@ -279,15 +279,24 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
-		/* Start audio streaming */
-		/* In real implementation, would configure USB isochronous transfer */
+		/* Start USB audio streaming */
+		/* In real implementation:
+		 * - Allocate USB isochronous or bulk URBs
+		 * - Set up transfer buffers pointing to DMA area
+		 * - Submit URBs to USB device for periodic transfers
+		 * - Set stream running flag
+		 */
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
 		runtime->dma_position = 0;
 		return 0;
 		
 	case SNDRV_PCM_TRIGGER_STOP:
-		/* Stop audio streaming */
-		/* In real implementation, would stop USB isochronous transfer */
+		/* Stop USB audio streaming */
+		/* In real implementation:
+		 * - Unlink all active URBs
+		 * - Stop transfers from device
+		 * - Free allocated URB buffers
+		 */
 		runtime->state = SNDRV_PCM_STATE_STOPPED;
 		return 0;
 		
@@ -312,8 +321,12 @@ line6_pcm_pointer(struct snd_pcm_substream *substream)
 	if (runtime == NULL || runtime->dma_area == NULL)
 		return 0;
 	
-	/* Return current DMA buffer position in bytes */
-	/* In real implementation, would read actual USB device position */
+	/* Get current USB transfer position */
+	/* In real implementation:
+	 * - Read current frame number from USB device
+	 * - Map to DMA buffer position
+	 * - Return wrapped position within buffer
+	 */
 	return runtime->dma_position % runtime->dma_bytes;
 }
 

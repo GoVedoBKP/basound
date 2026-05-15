@@ -116,6 +116,7 @@ struct hdsp {
 
 #define HDSP_InitializationComplete (1<<0)
 #define HDSP_ClockModeMaster    (1<<4)
+#define HDSP_AudioInterruptEnable (1<<6)
 
 #define HDSP_DllError (1<<6)
 #define HDSP_S_PROGRAM 0x20
