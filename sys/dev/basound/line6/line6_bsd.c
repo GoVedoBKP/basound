@@ -29,6 +29,7 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/rawmidi.h>
+#include "../audio_stream.h"
 
 /* Line6 USB driver - bridges FreeBSD usb_device to ALSA Line6 driver */
 
@@ -273,38 +274,53 @@ static int
 line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct audio_stream *stream;
 	
 	if (runtime == NULL)
 		return -EINVAL;
 	
+	/* Get audio_stream from private data if available */
+	stream = (struct audio_stream *)runtime->private_data;
+	
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
-		/* Start USB audio streaming */
-		/* In real implementation:
-		 * - Allocate USB isochronous or bulk URBs
-		 * - Set up transfer buffers pointing to DMA area
-		 * - Submit URBs to USB device for periodic transfers
-		 * - Set stream running flag
-		 */
+		/* Start USB audio streaming with framework integration */
+		if (stream) {
+			audio_stream_start(stream);
+			/* In real implementation:
+			 * - Allocate USB isochronous or bulk URBs
+			 * - Set up transfer buffers pointing to DMA area
+			 * - Submit URBs to USB device for periodic transfers
+			 * - Framework position tracking handles updates
+			 */
+		}
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
 		runtime->dma_position = 0;
 		return 0;
 		
 	case SNDRV_PCM_TRIGGER_STOP:
 		/* Stop USB audio streaming */
-		/* In real implementation:
-		 * - Unlink all active URBs
-		 * - Stop transfers from device
-		 * - Free allocated URB buffers
-		 */
+		if (stream) {
+			audio_stream_stop(stream);
+			/* In real implementation:
+			 * - Unlink all active URBs
+			 * - Stop transfers from device
+			 * - Free allocated URB buffers
+			 * - Framework handles state cleanup
+			 */
+		}
 		runtime->state = SNDRV_PCM_STATE_STOPPED;
 		return 0;
 		
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		if (stream)
+			audio_stream_pause(stream);
 		runtime->state = SNDRV_PCM_STATE_PAUSED;
 		return 0;
 		
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		if (stream)
+			audio_stream_resume(stream);
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
 		return 0;
 		
@@ -317,17 +333,32 @@ static unsigned long
 line6_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct audio_stream *stream;
+	unsigned long position = 0;
 	
 	if (runtime == NULL || runtime->dma_area == NULL)
 		return 0;
 	
-	/* Get current USB transfer position */
+	/* Get audio_stream from private data if available */
+	stream = (struct audio_stream *)runtime->private_data;
+	
+	if (stream) {
+		/* Get position from audio_stream framework */
+		mtx_lock(&stream->lock);
+		position = stream->position % runtime->dma_bytes;
+		mtx_unlock(&stream->lock);
+	} else {
+		/* Fallback to runtime position if framework not available */
+		position = runtime->dma_position % runtime->dma_bytes;
+	}
+	
 	/* In real implementation:
 	 * - Read current frame number from USB device
-	 * - Map to DMA buffer position
+	 * - Map to DMA buffer position via framework
+	 * - Call audio_stream_update_position() on URB completion
 	 * - Return wrapped position within buffer
 	 */
-	return runtime->dma_position % runtime->dma_bytes;
+	return position;
 }
 
 static const struct snd_pcm_ops line6_pcm_ops = {
