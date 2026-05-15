@@ -35,6 +35,13 @@ snd_hdsp_create(struct snd_card *card, struct hdsp *hdsp)
 
 	mtx_init(&hdsp->lock, "hdsp_lock", NULL, MTX_DEF);
 	
+	/* Initialize audio_stream structures */
+	mtx_init(&hdsp->capture_stream.lock, "hdsp_capture_stream", NULL, MTX_DEF);
+	hdsp->capture_stream.state = AUDIO_STREAM_IDLE;
+	
+	mtx_init(&hdsp->playback_stream.lock, "hdsp_playback_stream", NULL, MTX_DEF);
+	hdsp->playback_stream.state = AUDIO_STREAM_IDLE;
+	
 	/* Identify card type */
 	if (hdsp->pci->device == PCI_DEVICE_ID_RME_DIGIFACE ||
 	    hdsp->pci->device == PCI_DEVICE_ID_RME_MULTIFACE) {
