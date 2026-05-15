@@ -117,6 +117,20 @@ snd_hdsp_interrupt(void *arg)
 	}
 
 	if (audio) {
+		/* Update position from hardware status register */
+		if (hdsp->running != 0) {
+			uint32_t buffer_position = (status & HDSP_BufferPositionMask) >> 6;
+			unsigned long position = buffer_position;
+			
+			if (position > 0 && hdsp->period_bytes > 0) {
+				position = (position * 4) % (hdsp->period_bytes * 2);
+			}
+			
+			/* Update audio_stream framework with current position */
+			audio_stream_update_position(&hdsp->playback_stream, position);
+			audio_stream_update_position(&hdsp->capture_stream, position);
+		}
+		
 		/* Notify FreeBSD PCM channels */
 		if (hdsp->capture_substream)
 			snd_pcm_period_elapsed(hdsp->capture_substream);
@@ -275,9 +289,17 @@ int
 snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct hdsp *hdsp = (struct hdsp *)substream->pcm->private_data;
+	struct audio_stream *stream;
+	uint32_t control;
+	int stream_dir;
 
 	if (hdsp == NULL)
 		return -EINVAL;
+
+	/* Determine which stream (playback or capture) */
+	stream_dir = substream->stream;
+	stream = (stream_dir == SNDRV_PCM_STREAM_PLAYBACK) ? 
+		 &hdsp->playback_stream : &hdsp->capture_stream;
 
 	mtx_lock(&hdsp->lock);
 	
@@ -285,19 +307,32 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 	case 1: /* SNDRV_PCM_TRIGGER_START */
 		/* Start HDSP hardware streaming */
 		if (hdsp->running == 0) {
-			/* Enable output */
-			uint32_t control = hdsp_read(hdsp, HDSP_controlRegister);
+			/* Configure DMA buffer addresses from framework */
+			
+			/* Write output (playback) DMA buffer physical address */
+			if (hdsp->playback_dma_buf.bytes > 0 && 
+			    hdsp->playback_dma_buf.addr != 0) {
+				hdsp_write(hdsp, HDSP_outputBufferAddress, 
+					   (uint32_t)hdsp->playback_dma_buf.addr);
+			}
+			
+			/* Write input (capture) DMA buffer physical address */
+			if (hdsp->capture_dma_buf.bytes > 0 && 
+			    hdsp->capture_dma_buf.addr != 0) {
+				hdsp_write(hdsp, HDSP_inputBufferAddress, 
+					   (uint32_t)hdsp->capture_dma_buf.addr);
+			}
+			
+			/* Enable audio interrupts to start transfers */
+			control = hdsp_read(hdsp, HDSP_controlRegister);
 			hdsp_write(hdsp, HDSP_controlRegister, 
 				   control | HDSP_AudioInterruptEnable);
 			
+			/* Update audio_stream framework state */
+			audio_stream_start(stream);
+			
 			/* Set stream as running */
 			hdsp->running = 1;
-			
-			/* In real implementation:
-			 * - Configure DMA addresses in HDSP_outputBufferAddress, HDSP_inputBufferAddress
-			 * - Set up period size and frame count
-			 * - Enable isochronous transfers
-			 */
 		}
 		mtx_unlock(&hdsp->lock);
 		return 0;
@@ -305,19 +340,30 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 	case 0: /* SNDRV_PCM_TRIGGER_STOP */
 		/* Stop HDSP hardware streaming */
 		if (hdsp->running != 0) {
-			/* Disable output */
-			uint32_t control = hdsp_read(hdsp, HDSP_controlRegister);
+			/* Update audio_stream framework state */
+			audio_stream_stop(stream);
+			
+			/* Disable audio interrupts to stop transfers */
+			control = hdsp_read(hdsp, HDSP_controlRegister);
 			hdsp_write(hdsp, HDSP_controlRegister, 
 				   control & ~HDSP_AudioInterruptEnable);
 			
+			/* Reset DMA pointer to beginning of buffer */
+			hdsp_write(hdsp, HDSP_resetPointer, 0);
+			
 			/* Clear running flag */
 			hdsp->running = 0;
-			
-			/* In real implementation:
-			 * - Disable isochronous transfers
-			 * - Reset DMA pointers
-			 */
 		}
+		mtx_unlock(&hdsp->lock);
+		return 0;
+		
+	case 3: /* SNDRV_PCM_TRIGGER_PAUSE_PUSH */
+		audio_stream_pause(stream);
+		mtx_unlock(&hdsp->lock);
+		return 0;
+		
+	case 4: /* SNDRV_PCM_TRIGGER_PAUSE_RELEASE */
+		audio_stream_resume(stream);
 		mtx_unlock(&hdsp->lock);
 		return 0;
 		
@@ -331,25 +377,44 @@ unsigned long
 snd_hdsp_pointer(struct snd_pcm_substream *substream)
 {
 	struct hdsp *hdsp = (struct hdsp *)substream->pcm->private_data;
+	struct audio_stream *stream;
 	unsigned long position = 0;
+	uint32_t status;
+	uint32_t buffer_position;
+	int stream_dir;
 
 	if (hdsp == NULL)
 		return 0;
 
+	/* Determine which stream (playback or capture) */
+	stream_dir = substream->stream;
+	stream = (stream_dir == SNDRV_PCM_STREAM_PLAYBACK) ? 
+		 &hdsp->playback_stream : &hdsp->capture_stream;
+
 	mtx_lock(&hdsp->lock);
 	
-	if (hdsp->running != 0) {
+	if (hdsp->running != 0 && hdsp->period_bytes > 0) {
 		/* Read current buffer position from HDSP hardware */
-		uint32_t status = hdsp_read(hdsp, HDSP_statusRegister);
+		status = hdsp_read(hdsp, HDSP_statusRegister);
 		
-		/* Extract buffer position from status register */
-		position = (status & HDSP_BufferPositionMask) >> 6;
+		/* Extract buffer position from status register (bits 6-15) */
+		buffer_position = (status & HDSP_BufferPositionMask) >> 6;
 		
-		/* Convert to byte offset */
-		if (hdsp->period_bytes > 0) {
-			position = (position * hdsp->period_bytes) % 
-				   (hdsp->period_bytes * 2);
+		/* Convert hardware position (in samples) to frames
+		 * Hardware gives us position, we need to convert to ALSA frame offset
+		 * Each frame is period_bytes long
+		 */
+		position = buffer_position;
+		
+		/* Ensure position doesn't exceed buffer size
+		 * Typical ring buffer is 2 periods
+		 */
+		if (position > 0) {
+			position = (position * 4) % (hdsp->period_bytes * 2);
 		}
+		
+		/* Update audio_stream framework with actual position */
+		audio_stream_update_position(stream, position);
 	}
 	
 	mtx_unlock(&hdsp->lock);

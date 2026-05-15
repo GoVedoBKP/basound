@@ -10,6 +10,7 @@
 #include <sound/pcm.h>
 #include <sound/pci.h>
 #include <sound/control.h>
+#include "../audio_stream.h"
 
 /* Register Offsets */
 #define HDSP_resetPointer               0
@@ -105,6 +106,10 @@ struct hdsp {
 	struct pci_dev       *pci;
 	
 	unsigned short        mixer_matrix[HDSP_MATRIX_MIXER_SIZE];
+	
+	/* Audio streaming framework */
+	struct audio_stream   capture_stream;
+	struct audio_stream   playback_stream;
 };
 
 #define HDSP_audioIRQPending    (1<<0)

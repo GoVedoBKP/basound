@@ -44,4 +44,5 @@ sys/dev/basound/hdsp/hdsp_midi.o: sys/dev/basound/hdsp/hdsp_midi.c \
   /home/mirsha/msdev/basound/sys/alsa/include/sound/pci.h \
   /usr/src/sys/sys/rman.h machine/resource.h \
   /usr/src/sys/dev/pci/pcivar.h pci_if.h /usr/src/sys/dev/pci/pcireg.h \
-  /home/mirsha/msdev/basound/sys/alsa/include/sound/control.h
+  /home/mirsha/msdev/basound/sys/alsa/include/sound/control.h \
+  sys/dev/basound/hdsp/../audio_stream.h
