@@ -1,0 +1,12 @@
+#ifndef _LINUX_FIREWIRE_CONSTANTS_H_
+#define _LINUX_FIREWIRE_CONSTANTS_H_
+
+/* Simplification: Just define essential constants needed by Dice */
+#define TCODE_WRITE_QUADLET_REQUEST	0x0
+#define TCODE_READ_QUADLET_RESPONSE	0x6
+#define TCODE_WRITE_BLOCK_REQUEST	0x1
+#define TCODE_READ_BLOCK_REQUEST	0x4
+#define TCODE_READ_BLOCK_RESPONSE	0x7
+#define TCODE_LOCK_REQUEST		0x2
+
+#endif

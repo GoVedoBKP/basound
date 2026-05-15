@@ -1,0 +1,10 @@
+name: basound
+short description: alsa drivers for freebsd
+long description: allow the usage of alsa drivers for profesional and pro-consumer cards on freebsd
+requirements:
+- do not touch / modify freebsd source
+- create a glue layer / driver between the alsa drivers and the freebsd sound system
+- do not touch / modify the alsa drivers where possible
+- do support only professional and pro-consumer devices
+- do support midi
+- do not support standard onboard cards, gpu cards, devices supported by the freebsd uaudio driver

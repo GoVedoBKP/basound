@@ -1,0 +1,62 @@
+# basound Project Plan
+
+## Objective
+Create a glue layer for FreeBSD that allows using ALSA drivers for professional and pro-consumer sound cards.
+
+## Key Files & Context
+- `basound.init`: Initial project requirements.
+- FreeBSD Kernel Source (reference only, do not modify).
+- ALSA Driver Source (upstream, minimize modifications).
+
+## Requirements Summary
+- **No modification to FreeBSD core source.**
+- **Create a glue layer/driver** between ALSA drivers and FreeBSD sound system.
+- **Minimize ALSA driver modifications.**
+- **Scope:** Professional/pro-consumer cards only.
+- **Support:** MIDI.
+- **Exclude:** Standard onboard cards, GPU cards, and `uaudio` compatible devices.
+
+## Architecture: Kernel Shim Layer
+The project will consist of a FreeBSD kernel module that provides an emulation environment for the ALSA framework.
+
+### 1. ALSA Core Shim
+- Implement `alsa-kernel` APIs in FreeBSD KPI.
+- Support for `snd_card`, `snd_pcm`, `snd_pcm_ops`.
+- Memory management mapping (ALSA `dma_alloc` -> FreeBSD `bus_dma`).
+
+### 2. FreeBSD Sound/MIDI Integration
+- Register as a FreeBSD `pcm` device.
+- Map ALSA PCM callbacks to FreeBSD `snd_channel` operations.
+- Map ALSA MIDI callbacks to FreeBSD `midi` operations.
+
+### 3. Driver Porting Framework
+- Create a build system that allows compiling upstream ALSA drivers against the `basound` shim.
+- Identify initial target hardware (e.g., RME or M-Audio cards).
+
+## Implementation Phases
+
+### Phase 1: Infrastructure (Completed)
+- Set up the directory structure for the kernel module.
+- Implement basic ALSA core structures (`snd_card`, `snd_device`).
+- Implement logging and debugging utilities compatible with ALSA's `dev_dbg`, `dev_err`.
+
+### Phase 2: PCM & Memory (In Progress)
+- [x] Implement DMA memory allocation shim (`bus_dma` wrappers).
+- [x] Implement PCM core (`snd_pcm_new`, `snd_pcm_set_ops`).
+- [x] Map PCM operations to FreeBSD's `sound(4)` system (Initial bridge implemented).
+
+### Phase 3: MIDI & Control (Completed)
+- [x] Implement MIDI core shim.
+- [x] Implement Control (mixer) API shim.
+- [ ] Integrate with FreeBSD `midi(4)` and `mixer(8)` (Next step).
+
+### Phase 4: Driver Integration (Planned)
+- [ ] Implement PCI helper functions (`snd_pci_*`).
+- [ ] Choose a specific professional card driver to port as a proof of concept.
+- [ ] Adapt the driver's build system to the FreeBSD kernel module environment.
+
+## Verification & Testing
+- **Compilation:** Ensure the shim and drivers compile cleanly on FreeBSD.
+- **Loading:** Verify the kernel module loads without panics.
+- **Device Recognition:** Verify the driver attaches to the hardware.
+- **Functional Testing:** Use FreeBSD tools like `cat /dev/sndstat`, `mixer`, and MIDI utilities to verify audio playback and recording.
