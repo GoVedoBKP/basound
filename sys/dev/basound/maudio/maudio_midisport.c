@@ -45,10 +45,28 @@ MALLOC_DECLARE(M_ALSA);
 /* MIDI port configuration */
 #define MAUDIO_MIDISPORT_NUM_PORTS	8
 
+/* Output queue configuration */
+#define MAUDIO_MIDISPORT_OUT_QUEUE_SIZE	256  /* Bytes */
+#define MAUDIO_MIDISPORT_OUT_QUEUE_THRESH	64  /* Flush threshold */
+
+/* MIDI message parsing */
+#define MIDI_STATUS_MASK		0xF0
+#define MIDI_CHANNEL_MASK		0x0F
+#define MIDI_PORT_MASK			0x0F
+
 /* Bulk endpoint configuration */
 enum {
 	MAUDIO_MIDISPORT_BULK_IN = 0,
 	MAUDIO_MIDISPORT_BULK_OUT = 1,
+};
+
+/* Output queue entry */
+struct maudio_midi_output {
+	uint8_t buf[MAUDIO_MIDISPORT_OUT_QUEUE_SIZE];
+	int write_ptr;    /* Write position */
+	int read_ptr;     /* Read position */
+	int pending;      /* Bytes pending send */
+	struct mtx lock;  /* Queue synchronization */
 };
 
 struct maudio_midisport {
@@ -65,6 +83,13 @@ struct maudio_midisport {
 	int suspended;
 	int in_ports;
 	int out_ports;
+	
+	/* MIDI output queue for buffering writes */
+	struct maudio_midi_output outq;
+	
+	/* Statistics */
+	uint32_t midi_in_count;
+	uint32_t midi_out_count;
 };
 
 static struct usb_config maudio_midisport_config[2] = {
@@ -87,6 +112,88 @@ static struct usb_config maudio_midisport_config[2] = {
 };
 
 /*
+ * MIDI data processing and routing
+ */
+
+/* Parse MIDI input byte and route to appropriate ALSA stream
+ * M-Audio MIDISport 8x8 sends: [port, status, data1, data2, ...]
+ * where port byte encodes both the MIDI port (bits 0-3) and cable (bits 4-7)
+ */
+static void
+maudio_midisport_process_input(struct maudio_midisport *sc, uint8_t *buf, int len)
+{
+	int i = 0;
+	uint8_t port, status, d1, d2;
+	
+	while (i < len) {
+		port = buf[i];
+		
+		/* Port byte format: 0x0P where P is port number (0-7) */
+		port = port & MIDI_PORT_MASK;
+		
+		if (port >= MAUDIO_MIDISPORT_NUM_PORTS)
+			break;
+		
+		i++;
+		if (i >= len)
+			break;
+		
+		status = buf[i];
+		i++;
+		
+		/* Process based on message type */
+		if ((status & MIDI_STATUS_MASK) == 0xF0) {
+			/* System message */
+			if (status == 0xF0 || status == 0xF4 || status == 0xF5) {
+				/* SysEx or reserved */
+				device_printf(sc->dev, "Port %d: System message 0x%02x\n",
+					port, status);
+			} else {
+				device_printf(sc->dev, 
+					"Port %d: System Real-Time 0x%02x\n",
+					port, status);
+			}
+		} else if ((status & 0x80) != 0) {
+			/* Channel message */
+			uint8_t cmd = status & MIDI_STATUS_MASK;
+			uint8_t chan = status & MIDI_CHANNEL_MASK;
+			
+			switch (cmd) {
+			case 0x80:	/* Note Off */
+			case 0x90:	/* Note On */
+			case 0xA0:	/* Poly Pressure */
+			case 0xB0:	/* Control Change */
+			case 0xE0:	/* Pitch Wheel */
+				if (i + 1 < len) {
+					d1 = buf[i++];
+					d2 = buf[i++];
+					device_printf(sc->dev,
+						"Port %d Chan %d: cmd=0x%02x d1=0x%02x d2=0x%02x\n",
+						port, chan, cmd, d1, d2);
+					sc->midi_in_count++;
+				}
+				break;
+			case 0xC0:	/* Program Change */
+			case 0xD0:	/* Channel Pressure */
+				if (i < len) {
+					d1 = buf[i++];
+					device_printf(sc->dev,
+						"Port %d Chan %d: cmd=0x%02x d1=0x%02x\n",
+						port, chan, cmd, d1);
+					sc->midi_in_count++;
+				}
+				break;
+			default:
+				device_printf(sc->dev,
+					"Port %d: Unknown status 0x%02x\n",
+					port, status);
+				break;
+			}
+		}
+	}
+}
+
+/*
  * USB transfer callbacks
  */
 static void
@@ -94,21 +201,14 @@ maudio_midisport_input_callback(struct usb_xfer *xfer, usb_error_t error)
 {
 	struct maudio_midisport *sc = usbd_xfer_softc(xfer);
 	int actlen;
-	int i;
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
 		actlen = usbd_xfer_frame_len(xfer, 0);
 		
 		if (actlen > 0) {
-			/* Process MIDI data from device
-			 * Raw MIDI data is passed through unchanged
-			 * Each byte represents a MIDI status, data, or continuation
-			 */
-			for (i = 0; i < actlen; i++) {
-				device_printf(sc->dev, "MIDI IN byte[%d]=0x%02x\n",
-					i, sc->inbuf[i]);
-			}
+			/* Process received MIDI data and route to ALSA */
+			maudio_midisport_process_input(sc, sc->inbuf, actlen);
 		}
 		
 		/* Continue to next transfer */
@@ -142,14 +242,75 @@ static void
 maudio_midisport_output_callback(struct usb_xfer *xfer, usb_error_t error)
 {
 	struct maudio_midisport *sc = usbd_xfer_softc(xfer);
+	struct maudio_midi_output *outq = &sc->outq;
+	int len;
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_TRANSFERRED:
-		device_printf(sc->dev, "MIDI OUT: transfer complete\n");
+		device_printf(sc->dev, "MIDI OUT: transferred\n");
+		sc->midi_out_count++;
+		
+		/* Check if more data queued */
+		mtx_lock(&outq->lock);
+		if (outq->pending > 0) {
+			/* Copy pending data from queue to USB buffer */
+			len = outq->pending;
+			if (len > MAUDIO_MIDISPORT_MAX_TRANSFER)
+				len = MAUDIO_MIDISPORT_MAX_TRANSFER;
+			
+			/* Handle queue wraparound */
+			if (outq->read_ptr + len <= MAUDIO_MIDISPORT_OUT_QUEUE_SIZE) {
+				memcpy(sc->outbuf, 
+					&outq->buf[outq->read_ptr], len);
+			} else {
+				int part1 = MAUDIO_MIDISPORT_OUT_QUEUE_SIZE - outq->read_ptr;
+				int part2 = len - part1;
+				memcpy(sc->outbuf, &outq->buf[outq->read_ptr], part1);
+				memcpy(&sc->outbuf[part1], outq->buf, part2);
+			}
+			
+			/* Update queue pointers */
+			outq->read_ptr = (outq->read_ptr + len) % MAUDIO_MIDISPORT_OUT_QUEUE_SIZE;
+			outq->pending -= len;
+			
+			mtx_unlock(&outq->lock);
+			
+			/* Submit transfer with new data */
+			usbd_xfer_set_frame_len(xfer, 0, len);
+			usbd_transfer_submit(xfer);
+		} else {
+			mtx_unlock(&outq->lock);
+		}
 		break;
 		
 	case USB_ST_SETUP:
-		/* Output transfers submitted on demand from write callbacks */
+		/* Check queue on setup */
+		mtx_lock(&outq->lock);
+		if (outq->pending > 0) {
+			len = outq->pending;
+			if (len > MAUDIO_MIDISPORT_MAX_TRANSFER)
+				len = MAUDIO_MIDISPORT_MAX_TRANSFER;
+			
+			if (outq->read_ptr + len <= MAUDIO_MIDISPORT_OUT_QUEUE_SIZE) {
+				memcpy(sc->outbuf, 
+					&outq->buf[outq->read_ptr], len);
+			} else {
+				int part1 = MAUDIO_MIDISPORT_OUT_QUEUE_SIZE - outq->read_ptr;
+				int part2 = len - part1;
+				memcpy(sc->outbuf, &outq->buf[outq->read_ptr], part1);
+				memcpy(&sc->outbuf[part1], outq->buf, part2);
+			}
+			
+			outq->read_ptr = (outq->read_ptr + len) % MAUDIO_MIDISPORT_OUT_QUEUE_SIZE;
+			outq->pending -= len;
+			
+			mtx_unlock(&outq->lock);
+			
+			usbd_xfer_set_frame_len(xfer, 0, len);
+			usbd_transfer_submit(xfer);
+		} else {
+			mtx_unlock(&outq->lock);
+		}
 		break;
 		
 	default:
@@ -159,6 +320,60 @@ maudio_midisport_output_callback(struct usb_xfer *xfer, usb_error_t error)
 		}
 		break;
 	}
+}
+
+/*
+ * Queue MIDI output data for transmission
+ * Handles circular buffer management and flow control
+ */
+static int
+maudio_midisport_queue_output(struct maudio_midisport *sc, uint8_t *data, int len)
+{
+	struct maudio_midi_output *outq = &sc->outq;
+	int space_available;
+	int ret = 0;
+
+	mtx_lock(&outq->lock);
+	
+	/* Calculate available space */
+	space_available = MAUDIO_MIDISPORT_OUT_QUEUE_SIZE - outq->pending;
+	
+	if (len > space_available) {
+		/* Queue overflow - truncate */
+		len = space_available;
+		device_printf(sc->dev, "MIDI OUT queue overflow, truncating\n");
+	}
+	
+	if (len == 0) {
+		mtx_unlock(&outq->lock);
+		return 0;  /* No space */
+	}
+	
+	/* Copy data to queue (handle wraparound) */
+	if (outq->write_ptr + len <= MAUDIO_MIDISPORT_OUT_QUEUE_SIZE) {
+		memcpy(&outq->buf[outq->write_ptr], data, len);
+	} else {
+		int part1 = MAUDIO_MIDISPORT_OUT_QUEUE_SIZE - outq->write_ptr;
+		int part2 = len - part1;
+		memcpy(&outq->buf[outq->write_ptr], data, part1);
+		memcpy(outq->buf, &data[part1], part2);
+	}
+	
+	outq->write_ptr = (outq->write_ptr + len) % MAUDIO_MIDISPORT_OUT_QUEUE_SIZE;
+	outq->pending += len;
+	ret = len;
+	
+	/* If queue exceeded threshold, try to submit transfer */
+	if (outq->pending >= MAUDIO_MIDISPORT_OUT_QUEUE_THRESH) {
+		mtx_unlock(&outq->lock);
+		mtx_lock(&sc->lock);
+		usbd_transfer_start(sc->xfer[MAUDIO_MIDISPORT_BULK_OUT]);
+		mtx_unlock(&sc->lock);
+	} else {
+		mtx_unlock(&outq->lock);
+	}
+	
+	return ret;
 }
 
 /*
@@ -223,6 +438,12 @@ maudio_midisport_attach(device_t dev)
 	sc->dev = dev;
 	sc->udev = uaa->device;
 	mtx_init(&sc->lock, "maudio_midisport", NULL, MTX_DEF);
+	
+	/* Initialize MIDI output queue */
+	mtx_init(&sc->outq.lock, "maudio_midisport_outq", NULL, MTX_DEF);
+	sc->outq.write_ptr = 0;
+	sc->outq.read_ptr = 0;
+	sc->outq.pending = 0;
 
 	/* Create ALSA sound card */
 	err = snd_card_new(NULL, -1, 
@@ -305,6 +526,7 @@ maudio_midisport_detach(device_t dev)
 	snd_card_free(sc->card);
 
 	mtx_destroy(&sc->lock);
+	mtx_destroy(&sc->outq.lock);
 	return 0;
 }
 
