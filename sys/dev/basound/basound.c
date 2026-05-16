@@ -2,6 +2,7 @@
 #include <sys/module.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
+#include <dev/sound/pcm/sound.h>
 
 static int
 basound_modevent(module_t mod, int type, void *data)
@@ -31,3 +32,4 @@ static moduledata_t basound_mod = {
 
 DECLARE_MODULE(basound, basound_mod, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
 MODULE_VERSION(basound, 1);
+MODULE_DEPEND(basound, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
