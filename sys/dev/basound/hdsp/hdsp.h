@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef _BASOUND_HDSP_H_
 #define _BASOUND_HDSP_H_
 

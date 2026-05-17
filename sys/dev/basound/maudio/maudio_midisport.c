@@ -1,5 +1,5 @@
 /*-
- * SPDX-License-Identifier: BSD-2-Clause
+ * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * FreeBSD M-Audio MIDISport 8x8 USB MIDI Driver
  * Bridges M-Audio MIDISport 8x8 USB MIDI interface to FreeBSD sound(4) system

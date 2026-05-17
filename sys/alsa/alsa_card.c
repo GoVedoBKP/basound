@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/control.h>

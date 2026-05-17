@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <sound/pcm.h>
 #include <sound/memalloc.h>
 #include <sys/systm.h>

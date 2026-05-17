@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef _LINUX_SLAB_H_
 #define _LINUX_SLAB_H_
 

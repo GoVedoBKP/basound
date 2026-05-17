@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <linux/workqueue.h>
 #include <sys/kernel.h>
 #include <sys/bus.h>

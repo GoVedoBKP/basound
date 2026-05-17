@@ -1,5 +1,5 @@
 /*-
- * SPDX-License-Identifier: BSD-2-Clause
+ * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * FreeBSD Line6 USB Audio Driver
  * Bridges Line6 USB audio devices to FreeBSD sound(4) system

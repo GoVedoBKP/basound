@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef _SOUND_ASOUND_H_
 #define _SOUND_ASOUND_H_
 

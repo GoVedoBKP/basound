@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <sound/pci.h>
 #include <sys/systm.h>
 #include <machine/bus.h>

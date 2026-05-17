@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef _ALSA_MEMALLOC_H_
 #define _ALSA_MEMALLOC_H_
 

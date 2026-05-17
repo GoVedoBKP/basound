@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef _ALSA_PCM_BSD_H_
 #define _ALSA_PCM_BSD_H_
 

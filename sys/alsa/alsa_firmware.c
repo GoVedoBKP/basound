@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <linux/firmware.h>
 #include <sound/core.h>
 #include <sys/param.h>
