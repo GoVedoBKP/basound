@@ -114,14 +114,6 @@ basound_pcm_register(struct snd_pcm *pcm)
 
 	pcm_init(dev, pcm);
 
-	/* Add playback channels */
-	if (pstr_p->substream_count > 0)
-		pcm_addchan(dev, PCMDIR_PLAY, &basound_chan_class, pcm);
-
-	/* Add capture channels */
-	if (pstr_c->substream_count > 0)
-		pcm_addchan(dev, PCMDIR_REC, &basound_chan_class, pcm);
-
 	snprintf(status, sizeof(status), "at %s", device_get_nameunit(dev));
 
 	/* Register the pcm device with FreeBSD */
@@ -129,6 +121,14 @@ basound_pcm_register(struct snd_pcm *pcm)
 		dev_err(card->dev, "pcm_register failed\n");
 		return -ENXIO;
 	}
+
+	/* Add playback channels */
+	if (pstr_p->substream_count > 0)
+		pcm_addchan(dev, PCMDIR_PLAY, &basound_chan_class, pcm);
+
+	/* Add capture channels */
+	if (pstr_c->substream_count > 0)
+		pcm_addchan(dev, PCMDIR_REC, &basound_chan_class, pcm);
 
 	return 0;
 }

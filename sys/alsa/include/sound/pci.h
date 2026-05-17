@@ -25,13 +25,8 @@ struct pci_dev {
 
 int snd_pci_quirk_lookup(struct pci_dev *pci, const void *list);
 
-/* IO Access macros */
-#ifndef readl
-#define readl(addr)		bus_space_read_4(X86_BUS_SPACE_MEM, (bus_space_handle_t)(addr), 0)
-#endif
-#ifndef writel
-#define writel(val, addr)	bus_space_write_4(X86_BUS_SPACE_MEM, (bus_space_handle_t)(addr), 0, (val))
-#endif
+/* IO Access macros - should be implemented using the correct bus handle and tag */
+/* Drivers should use bus_space_read/write directly or via safe helpers */
 
 void *ioremap(bus_addr_t offset, size_t size);
 void iounmap(void *addr);

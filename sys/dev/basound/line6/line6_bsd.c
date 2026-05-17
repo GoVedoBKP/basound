@@ -419,19 +419,13 @@ line6_bsd_attach(device_t dev)
 	if (info == NULL)
 		return ENXIO;
 
-	/* Allocate softc */
-	sc = malloc(sizeof(*sc), M_LINE6_BSD, M_WAITOK | M_ZERO);
-	if (sc == NULL)
-		return ENOMEM;
-
+	sc = device_get_softc(dev);
 	sc->dev = dev;
 	sc->usbdev = uaa->device;
 	sc->idesc = usbd_get_interface_descriptor(uaa->iface);
 	sc->capabilities = info->capabilities;
 	sc->device_name = info->name;
 	sc->alsa_dev.bsddev = dev;
-
-	device_set_softc(dev, sc);
 
 	device_printf(dev, "Probing %s (USB %04x:%04x)\n",
 		      info->name, uaa->info.idVendor, uaa->info.idProduct);
@@ -440,7 +434,6 @@ line6_bsd_attach(device_t dev)
 	err = snd_card_new(&sc->alsa_dev, 0, info->card_id, NULL, 0, &card);
 	if (err < 0) {
 		device_printf(dev, "Failed to create sound card: %d\n", err);
-		free(sc, M_LINE6_BSD);
 		return ENXIO;
 	}
 
@@ -460,7 +453,6 @@ line6_bsd_attach(device_t dev)
 		if (err < 0) {
 			device_printf(dev, "Failed to create PCM device: %d\n", err);
 			snd_card_free(card);
-			free(sc, M_LINE6_BSD);
 			return ENXIO;
 		}
 
@@ -487,7 +479,6 @@ line6_bsd_attach(device_t dev)
 	if (err < 0) {
 		device_printf(dev, "Failed to register sound card: %d\n", err);
 		snd_card_free(card);
-		free(sc, M_LINE6_BSD);
 		return ENXIO;
 	}
 
@@ -513,7 +504,6 @@ line6_bsd_detach(device_t dev)
 		snd_card_free(card);
 	}
 
-	free(sc, M_LINE6_BSD);
 	return 0;
 }
 
@@ -527,7 +517,7 @@ static device_method_t line6_bsd_methods[] = {
 static driver_t line6_bsd_driver = {
 	"basound_line6",
 	line6_bsd_methods,
-	sizeof(struct usb_attach_arg),
+	sizeof(struct line6_bsd_softc),
 };
 
 DRIVER_MODULE(basound_line6, uhub, line6_bsd_driver, 0, 0);

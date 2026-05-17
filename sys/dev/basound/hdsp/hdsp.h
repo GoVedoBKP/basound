@@ -162,12 +162,14 @@ unsigned long snd_hdsp_pointer(struct snd_pcm_substream *substream);
 /* Register access helpers */
 static inline uint32_t hdsp_read(struct hdsp *hdsp, int reg)
 {
-	return readl((char *)hdsp->iobase + reg);
+	return bus_space_read_4(rman_get_bustag(hdsp->pci->res[0]), 
+				rman_get_bushandle(hdsp->pci->res[0]), reg);
 }
 
 static inline void hdsp_write(struct hdsp *hdsp, int reg, uint32_t val)
 {
-	writel((char *)hdsp->iobase + reg, val);
+	bus_space_write_4(rman_get_bustag(hdsp->pci->res[0]), 
+			  rman_get_bushandle(hdsp->pci->res[0]), reg, val);
 }
 
 #endif /* _BASOUND_HDSP_H_ */
