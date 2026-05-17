@@ -26,6 +26,7 @@
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
 #include <dev/usb/usbdi_util.h>
+#include <dev/sound/pcm/sound.h>
 
 #include <sound/core.h>
 #include <sound/rawmidi.h>
@@ -574,5 +575,5 @@ static driver_t maudio_midisport_driver = {
 
 DRIVER_MODULE(basound_maudio, uhub, maudio_midisport_driver, 0, 0);
 MODULE_DEPEND(basound_maudio, usb, 1, 1, 1);
-MODULE_DEPEND(basound_maudio, sound, 2, 2, 2);
+MODULE_DEPEND(basound_maudio, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
 

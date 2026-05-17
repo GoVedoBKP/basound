@@ -24,6 +24,7 @@
 #include <dev/usb/usbdi.h>
 #include <dev/usb/usbdi_util.h>
 #include <dev/usb/usbhid.h>
+#include <dev/sound/pcm/sound.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -534,4 +535,4 @@ static driver_t line6_bsd_driver = {
 DRIVER_MODULE(basound_line6, uhub, line6_bsd_driver, 0, 0);
 MODULE_DEPEND(basound_line6, basound, 1, 1, 1);
 MODULE_DEPEND(basound_line6, usb, 1, 1, 1);
-MODULE_DEPEND(basound_line6, sound, 1, 1, 1);
+MODULE_DEPEND(basound_line6, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);

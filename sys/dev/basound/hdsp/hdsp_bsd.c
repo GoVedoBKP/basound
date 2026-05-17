@@ -6,6 +6,7 @@
 #include <sys/malloc.h>
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
+#include <dev/sound/pcm/sound.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -173,4 +174,4 @@ static driver_t hdsp_bsd_driver = {
 DRIVER_MODULE(basound_hdsp, pci, hdsp_bsd_driver, 0, 0);
 MODULE_DEPEND(basound_hdsp, basound, 1, 1, 1);
 MODULE_DEPEND(basound_hdsp, pci, 1, 1, 1);
-MODULE_DEPEND(basound_hdsp, sound, 1, 1, 1);
+MODULE_DEPEND(basound_hdsp, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);

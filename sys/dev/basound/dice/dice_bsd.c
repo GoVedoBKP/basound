@@ -6,6 +6,7 @@
 #include <sys/malloc.h>
 #include <dev/firewire/firewire.h>
 #include <dev/firewire/firewirereg.h>
+#include <dev/sound/pcm/sound.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -444,4 +445,4 @@ static driver_t dice_bsd_driver = {
 DRIVER_MODULE(basound_dice, firewire, dice_bsd_driver, 0, 0);
 MODULE_DEPEND(basound_dice, basound, 1, 1, 1);
 MODULE_DEPEND(basound_dice, firewire, 1, 1, 1);
-MODULE_DEPEND(basound_dice, sound, 1, 1, 1);
+MODULE_DEPEND(basound_dice, sound, SOUND_MINVER, SOUND_PREFVER, SOUND_MAXVER);
