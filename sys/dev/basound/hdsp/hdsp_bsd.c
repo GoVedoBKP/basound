@@ -63,6 +63,9 @@ hdsp_bsd_attach(device_t dev)
 	sc->chip.pci->vendor = pci_get_vendor(dev);
 	sc->chip.pci->device = pci_get_device(dev);
 
+	/* Read PCI revision byte — selects which FPGA bitstream to upload */
+	sc->chip.firmware_rev = pci_get_revid(dev);
+
 	/* Map BAR 0 - The HDSP has one BAR for all registers */
 	rid = PCIR_BAR(0);
 	sc->chip.pci->res_rid[0] = rid;

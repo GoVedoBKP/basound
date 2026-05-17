@@ -4,6 +4,7 @@
 #include <dev/pci/pcivar.h>
 
 #include "hdsp.h"
+#include "hdsp_fw.h"
 
 MALLOC_DECLARE(M_ALSA);
 
@@ -224,20 +225,40 @@ hdsp_set_rate(struct hdsp *hdsp, int rate, int called_internally)
 int
 snd_hdsp_upload_firmware(struct hdsp *hdsp)
 {
-	const struct firmware *fw;
+	const uint32_t *fw_data;
+	size_t fw_size;
 	int i;
-	const uint32_t *cache;
-	int err;
+	int is_rev11;
 
-	err = request_firmware(&fw, "rme_hdsp.bin", (struct device *)hdsp->pci);
-	if (err) {
-		dev_err(hdsp->card->dev, "Could not load firmware");
-		return err;
+	/*
+	 * Select the correct firmware image based on the I/O box type
+	 * and the PCI revision byte read during attach.
+	 *
+	 * Revision 0x11 (HDSP_PCI_REVISION_DSP_11) uses the "rev11"
+	 * bitstream; all other DSP revisions use the original image.
+	 */
+	is_rev11 = (hdsp->firmware_rev == HDSP_PCI_REVISION_DSP_11);
+
+	switch (hdsp->io_type) {
+	case Digiface:
+		fw_data = is_rev11 ? hdsp_firmware_digiface_rev11
+				   : hdsp_firmware_digiface;
+		fw_size = is_rev11 ? sizeof(hdsp_firmware_digiface_rev11)
+				   : sizeof(hdsp_firmware_digiface);
+		break;
+	case Multiface:
+		fw_data = is_rev11 ? hdsp_firmware_multiface_rev11
+				   : hdsp_firmware_multiface;
+		fw_size = is_rev11 ? sizeof(hdsp_firmware_multiface_rev11)
+				   : sizeof(hdsp_firmware_multiface);
+		break;
+	default:
+		/* H9652 and H9632 have their firmware in ROM; no upload needed */
+		return 0;
 	}
 
-	cache = (const uint32_t *)fw->data;
-
-	dev_info(hdsp->card->dev, "loading firmware");
+	dev_info(hdsp->card->dev, "loading firmware (%s rev%s)",
+	    hdsp->card_name, is_rev11 ? "11" : "");
 
 	hdsp_write(hdsp, HDSP_control2Reg, HDSP_S_PROGRAM);
 	hdsp_write(hdsp, HDSP_fifoData, 0);
@@ -245,18 +266,16 @@ snd_hdsp_upload_firmware(struct hdsp *hdsp)
 	if (hdsp_fifo_wait(hdsp, 0, HDSP_LONG_WAIT)) {
 		dev_err(hdsp->card->dev, "timeout waiting for download preparation");
 		hdsp_write(hdsp, HDSP_control2Reg, HDSP_S200);
-		release_firmware(fw);
 		return -EIO;
 	}
 
 	hdsp_write(hdsp, HDSP_control2Reg, HDSP_S_LOAD);
 
-	for (i = 0; i < fw->size / 4; ++i) {
-		hdsp_write(hdsp, HDSP_fifoData, cache[i]);
+	for (i = 0; i < (int)(fw_size / sizeof(uint32_t)); ++i) {
+		hdsp_write(hdsp, HDSP_fifoData, fw_data[i]);
 		if (hdsp_fifo_wait(hdsp, 127, HDSP_LONG_WAIT)) {
 			dev_err(hdsp->card->dev, "timeout during firmware loading");
 			hdsp_write(hdsp, HDSP_control2Reg, HDSP_S200);
-			release_firmware(fw);
 			return -EIO;
 		}
 	}
@@ -268,7 +287,6 @@ snd_hdsp_upload_firmware(struct hdsp *hdsp)
 	pause("hdspfw", 3 * hz);
 
 	dev_info(hdsp->card->dev, "finished firmware loading");
-	release_firmware(fw);
 	hdsp->state |= HDSP_InitializationComplete;
 
 	return 0;

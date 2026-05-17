@@ -5,7 +5,6 @@
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <linux/workqueue.h>
-#include <linux/firmware.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pci.h>
@@ -82,8 +81,6 @@ struct hdsp {
 	unsigned short        firmware_rev;
 	unsigned short        state;
 	
-	const struct firmware *firmware;
-	
 	size_t                period_bytes;
 	unsigned char         max_channels;
 	unsigned char         ss_in_channels;
@@ -132,9 +129,14 @@ struct hdsp {
 
 #define DDS_NUMERATOR 110000000000ULL
 
-#define HDSP_FIRMWARE_SIZE 24413
+/* HDSP_FIRMWARE_SIZE is the firmware size in bytes (24413 uint32_t words) */
+#define HDSP_FIRMWARE_SIZE (24413 * 4)
 #define HDSP_SHORT_WAIT 1
 #define HDSP_LONG_WAIT 500
+
+/* PCI revision IDs used to select firmware variant */
+#define HDSP_PCI_REVISION_DSP		0x37	/* original Digiface/Multiface */
+#define HDSP_PCI_REVISION_DSP_11	0x11	/* rev11 Digiface/Multiface */
 
 /* Internal helper */
 static inline void *snd_kcontrol_chip(struct snd_kcontrol *kcontrol)
