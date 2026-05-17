@@ -72,6 +72,7 @@ struct maudio_midi_output {
 
 struct maudio_midisport {
 	device_t dev;
+	struct device alsa_dev;	/* wrapper so card->dev stays valid after attach */
 	struct usb_device *udev;
 	struct snd_card *card;
 	struct snd_rawmidi *rmidi;
@@ -438,6 +439,7 @@ maudio_midisport_attach(device_t dev)
 
 	sc->dev = dev;
 	sc->udev = uaa->device;
+	sc->alsa_dev.bsddev = dev;
 	mtx_init(&sc->lock, "maudio_midisport", NULL, MTX_DEF);
 	
 	/* Initialize MIDI output queue */
@@ -447,7 +449,7 @@ maudio_midisport_attach(device_t dev)
 	sc->outq.pending = 0;
 
 	/* Create ALSA sound card */
-	err = snd_card_new(NULL, -1, 
+	err = snd_card_new(&sc->alsa_dev, -1, 
 		"MIDISport8x8", NULL, 0, &sc->card);
 	if (err < 0) {
 		device_printf(dev, "Failed to create card: %d\n", err);

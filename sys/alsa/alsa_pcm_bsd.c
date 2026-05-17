@@ -123,7 +123,7 @@ basound_pcm_register(struct snd_pcm *pcm)
 		pcm_addchan(dev, PCMDIR_REC, &basound_chan_class, pcm);
 
 	snprintf(status, sizeof(status), "at %s", device_get_nameunit(dev));
-	
+
 	/* Register the pcm device with FreeBSD */
 	if (pcm_register(dev, status)) {
 		dev_err(card->dev, "pcm_register failed\n");

@@ -157,6 +157,7 @@ static const struct line6_device_info line6_devices[] = {
 
 struct line6_bsd_softc {
 	device_t dev;
+	struct device alsa_dev;	/* wrapper so card->dev stays valid after attach */
 	struct usb_device *usbdev;
 	usb_interface_descriptor_t *idesc;
 	void *alsa_line6;
@@ -407,7 +408,6 @@ line6_bsd_attach(device_t dev)
 	const struct line6_device_info *info;
 	struct snd_card *card;
 	struct snd_pcm *pcm;
-	struct device linux_dev;
 	int err;
 
 	uaa = device_get_ivars(dev);
@@ -429,17 +429,15 @@ line6_bsd_attach(device_t dev)
 	sc->idesc = usbd_get_interface_descriptor(uaa->iface);
 	sc->capabilities = info->capabilities;
 	sc->device_name = info->name;
+	sc->alsa_dev.bsddev = dev;
 
 	device_set_softc(dev, sc);
 
 	device_printf(dev, "Probing %s (USB %04x:%04x)\n",
 		      info->name, uaa->info.idVendor, uaa->info.idProduct);
 
-	/* Create Linux device wrapper for ALSA compatibility */
-	linux_dev.bsddev = dev;
-
 	/* Create ALSA sound card */
-	err = snd_card_new(&linux_dev, 0, info->card_id, NULL, 0, &card);
+	err = snd_card_new(&sc->alsa_dev, 0, info->card_id, NULL, 0, &card);
 	if (err < 0) {
 		device_printf(dev, "Failed to create sound card: %d\n", err);
 		free(sc, M_LINE6_BSD);

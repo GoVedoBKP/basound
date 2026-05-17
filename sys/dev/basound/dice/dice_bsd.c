@@ -38,6 +38,7 @@ MALLOC_DECLARE(M_ALSA);
 
 struct dice_bsd_softc {
 	device_t dev;
+	struct device alsa_dev;	/* wrapper so card->dev stays valid after attach */
 	struct fw_device *fwdev;
 	void *alsa_dice;
 	
@@ -105,7 +106,7 @@ dice_pcm_open(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct snd_card *card = substream->pcm->card;
-	struct dice_bsd_softc *sc = (struct dice_bsd_softc *)card->dev->bsddev;
+	struct dice_bsd_softc *sc = device_get_softc(card->dev->bsddev);
 	struct audio_stream *stream;
 	
 	if (runtime == NULL)
@@ -356,6 +357,7 @@ dice_bsd_attach(device_t dev)
 	
 	sc->dev = dev;
 	sc->fwdev = fwdev;
+	sc->alsa_dev.bsddev = dev;
 	
 	/* Initialize audio streaming framework */
 	audio_stream_init(&sc->playback_stream, "dice_playback_stream");
@@ -369,7 +371,7 @@ dice_bsd_attach(device_t dev)
 	unit = device_get_unit(dev);
 	
 	/* Create ALSA sound card */
-	err = snd_card_new(NULL, unit, "DICE", NULL, 0, &card);
+	err = snd_card_new(&sc->alsa_dev, unit, "DICE", NULL, 0, &card);
 	if (err != 0) {
 		device_printf(dev, "Failed to create ALSA card: %d\n", err);
 		goto fail;
@@ -439,7 +441,7 @@ static device_method_t dice_bsd_methods[] = {
 static driver_t dice_bsd_driver = {
 	"basound_dice",
 	dice_bsd_methods,
-	sizeof(struct firewire_dev_comm),
+	sizeof(struct dice_bsd_softc),
 };
 
 DRIVER_MODULE(basound_dice, firewire, dice_bsd_driver, 0, 0);
