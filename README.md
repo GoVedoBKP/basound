@@ -1,4 +1,6 @@
-# BasoUnd - Professional Audio Device Drivers for FreeBSD
+# BASound - ALSA Device Drivers for FreeBSD
+
+DISCLAIMER: all this is not working. Even if you do not get kerel panic (but you will) do not expect any sound at this stage. Use on your own risk. 
 
 A FreeBSD kernel module that provides support for professional audio devices from multiple families:
 - **DICE** - FireWire audio interfaces (Weiss, Loud, Focusrite, TC Electronic, M-Audio, etc.)
