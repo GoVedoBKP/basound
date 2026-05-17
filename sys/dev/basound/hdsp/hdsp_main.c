@@ -181,6 +181,15 @@ hdsp_read_gain(struct hdsp *hdsp, int addr)
 	return hdsp->mixer_matrix[addr];
 }
 
+int
+hdsp_write_gain(struct hdsp *hdsp, unsigned int addr, unsigned short data)
+{
+	if (addr >= HDSP_MATRIX_MIXER_SIZE)
+		return -1;
+	hdsp->mixer_matrix[addr] = data;
+	return 0;
+}
+
 static void
 hdsp_set_dds_value(struct hdsp *hdsp, int rate)
 {
