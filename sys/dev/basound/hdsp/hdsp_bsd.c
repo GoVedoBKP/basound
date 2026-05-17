@@ -123,6 +123,10 @@ hdsp_bsd_attach(device_t dev)
 	if (err) {
 		device_printf(dev, "Failed to upload firmware\n");
 		snd_card_free(card);
+		if (sc->irq_cookie)
+			bus_teardown_intr(dev, sc->irq_res, sc->irq_cookie);
+		if (sc->irq_res)
+			bus_release_resource(dev, SYS_RES_IRQ, rid, sc->irq_res);
 		bus_release_resource(dev, SYS_RES_MEMORY, sc->chip.pci->res_rid[0], sc->chip.pci->res[0]);
 		free(sc->chip.pci, M_DEVBUF);
 		return (ENXIO);

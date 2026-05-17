@@ -27,8 +27,12 @@ request_firmware(const struct firmware **fw_p, const char *name, struct device *
 	NDINIT(&nd, LOOKUP, FOLLOW, UIO_SYSSPACE, path);
 	error = vn_open(&nd, &((int){FREAD}), 0, NULL);
 	if (error) {
-		/* Try another path if needed */
-		return -error;
+		/* Try current directory as fallback */
+		snprintf(path, sizeof(path), "./%s", name);
+		NDINIT(&nd, LOOKUP, FOLLOW, UIO_SYSSPACE, path);
+		error = vn_open(&nd, &((int){FREAD}), 0, NULL);
+		if (error)
+			return -error;
 	}
 
 	error = VOP_GETATTR(nd.ni_vp, &va, curthread->td_ucred);
