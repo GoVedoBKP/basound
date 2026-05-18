@@ -196,9 +196,24 @@ basound_pcm_register(struct snd_pcm *pcm)
 	}
 
 	device_set_ivars(pcm_dev, pcm);
+
+	/*
+	 * Explicitly set our driver so device_set_driver() allocates
+	 * PCM_SOFTC_SIZE bytes for the softc.  We then call device_attach()
+	 * directly to skip the devclass-based probe path (which would race
+	 * against the DRIVER_MODULE SYSINIT if the PCI reprobe fires before
+	 * our SYSINIT has run).
+	 */
+	err = device_set_driver(pcm_dev, &basound_pcm_driver);
+	if (err != 0) {
+		dev_err(card->dev, "device_set_driver failed: %d\n", err);
+		device_delete_child(parent, pcm_dev);
+		return -ENXIO;
+	}
+
 	card->pcm_dev = pcm_dev;
 
-	err = device_probe_and_attach(pcm_dev);
+	err = device_attach(pcm_dev);
 	if (err != 0) {
 		dev_err(card->dev, "pcm device attach failed: %d\n", err);
 		device_delete_child(parent, pcm_dev);
