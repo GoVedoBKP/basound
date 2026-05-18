@@ -401,20 +401,19 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 	case 1: /* SNDRV_PCM_TRIGGER_START */
 		/* Start HDSP hardware streaming */
 		if (hdsp->running == 0) {
-			/* Configure DMA buffer addresses from framework */
-			
-			/* Write output (playback) DMA buffer physical address */
-			if (hdsp->playback_dma_buf.bytes > 0 && 
-			    hdsp->playback_dma_buf.addr != 0) {
-				hdsp_write(hdsp, HDSP_outputBufferAddress, 
-					   (uint32_t)hdsp->playback_dma_buf.addr);
+			/* Program DMA buffer addresses from substream runtimes.
+			 * These are populated by basound_chan_init via sndbuf_alloc. */
+			if (hdsp->playback_substream != NULL &&
+			    hdsp->playback_substream->runtime != NULL &&
+			    hdsp->playback_substream->runtime->dma_bytes > 0) {
+				hdsp_write(hdsp, HDSP_outputBufferAddress,
+					   (uint32_t)hdsp->playback_substream->runtime->dma_addr);
 			}
-			
-			/* Write input (capture) DMA buffer physical address */
-			if (hdsp->capture_dma_buf.bytes > 0 && 
-			    hdsp->capture_dma_buf.addr != 0) {
-				hdsp_write(hdsp, HDSP_inputBufferAddress, 
-					   (uint32_t)hdsp->capture_dma_buf.addr);
+			if (hdsp->capture_substream != NULL &&
+			    hdsp->capture_substream->runtime != NULL &&
+			    hdsp->capture_substream->runtime->dma_bytes > 0) {
+				hdsp_write(hdsp, HDSP_inputBufferAddress,
+					   (uint32_t)hdsp->capture_substream->runtime->dma_addr);
 			}
 			
 			/* Enable audio interrupts to start transfers */

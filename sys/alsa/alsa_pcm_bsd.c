@@ -28,19 +28,45 @@ basound_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_chan
 	if (pstr->substream_count <= 0)
 		return NULL;
 
-	/* For now, just pick the first substream */
 	substream = &pstr->substream[0];
 
 	ch = malloc(sizeof(*ch), M_ALSA, M_WAITOK | M_ZERO);
 	ch->substream = substream;
 	ch->channel = c;
 	substream->private_data = ch;
-	
-	/* Initialize ALSA runtime */
+
 	ch->runtime = malloc(sizeof(*ch->runtime), M_ALSA, M_WAITOK | M_ZERO);
 	substream->runtime = ch->runtime;
 
+	/* Allocate DMA-capable hardware buffer (4 MB). */
+	if (sndbuf_alloc(b, bus_get_dma_tag(pcm->card->dev->bsddev), 0,
+	    4 * 1024 * 1024) != 0) {
+		free(ch->runtime, M_ALSA);
+		free(ch, M_ALSA);
+		return NULL;
+	}
+
+	/* Make the DMA address visible to the ALSA runtime and the
+	 * hardware trigger path (hdsp_main.c reads these via
+	 * hdsp->playback_substream->runtime->dma_addr). */
+	substream->runtime->dma_area  = sndbuf_getbuf(b);
+	substream->runtime->dma_addr  = sndbuf_getbufaddr(b);
+	substream->runtime->dma_bytes = sndbuf_getsize(b);
+
 	return ch;
+}
+
+static int
+basound_chan_free(kobj_t obj, void *data)
+{
+	struct basound_chan *ch = data;
+
+	if (ch->runtime != NULL) {
+		free(ch->runtime, M_ALSA);
+		ch->runtime = NULL;
+	}
+	free(ch, M_ALSA);
+	return 0;
 }
 
 static int
@@ -95,6 +121,7 @@ basound_chan_getptr(kobj_t obj, void *data)
 
 static kobj_method_t basound_chan_methods[] = {
 	KOBJMETHOD(channel_init,		basound_chan_init),
+	KOBJMETHOD(channel_free,		basound_chan_free),
 	KOBJMETHOD(channel_setformat,		basound_chan_setformat),
 	KOBJMETHOD(channel_setspeed,		basound_chan_setspeed),
 	KOBJMETHOD(channel_setblocksize,	basound_chan_setblocksize),
@@ -128,6 +155,10 @@ basound_pcm_attach(device_t dev)
 	struct snd_pcm_str *pstr_p = &pcm->streams[SNDRV_PCM_STREAM_PLAYBACK];
 	struct snd_pcm_str *pstr_c = &pcm->streams[SNDRV_PCM_STREAM_CAPTURE];
 	char status[SND_STATUSLEN];
+
+	/* Set description here because basound_pcm_probe is bypassed
+	 * (we use device_set_driver + device_attach directly). */
+	device_set_desc_copy(dev, pcm->id[0] ? pcm->id : "HDSP PCM");
 
 	/* dev's softc is PCM_SOFTC_SIZE bytes — safe for snddev_info */
 	pcm_init(dev, pcm);
