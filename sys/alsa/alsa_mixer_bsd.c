@@ -46,7 +46,12 @@ MIXER_DECLARE(basound_mixer);
 int
 basound_mixer_register(struct snd_card *card)
 {
-	device_t dev = card->dev->bsddev;
+	device_t dev = card->pcm_dev;
+
+	if (dev == NULL) {
+		dev_err(card->dev, "mixer_register: no pcm device\n");
+		return -EINVAL;
+	}
 
 	if (mixer_init(dev, &basound_mixer_class, card)) {
 		dev_err(card->dev, "mixer_init failed\n");

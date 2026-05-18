@@ -170,6 +170,9 @@ static device_method_t hdsp_bsd_methods[] = {
 	DEVMETHOD(device_probe,		hdsp_bsd_probe),
 	DEVMETHOD(device_attach,	hdsp_bsd_attach),
 	DEVMETHOD(device_detach,	hdsp_bsd_detach),
+	/* Bus methods needed to host the "pcm" child device */
+	DEVMETHOD(bus_add_child,	bus_generic_add_child),
+	DEVMETHOD(bus_print_child,	bus_generic_print_child),
 	DEVMETHOD_END
 };
 

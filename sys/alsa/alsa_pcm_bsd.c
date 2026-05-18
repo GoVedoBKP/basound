@@ -104,32 +104,108 @@ static kobj_method_t basound_chan_methods[] = {
 };
 DEFINE_CLASS(basound_chan, basound_chan_methods, 0);
 
-int
-basound_pcm_register(struct snd_pcm *pcm)
+/*
+ * PCM child device driver.
+ *
+ * The parent PCI device (e.g. basound_hdsp) creates a "pcm" child device via
+ * device_add_child(), stores a struct snd_pcm * in its ivars, and calls
+ * device_probe_and_attach().  This driver is registered for the
+ * "basound_hdsp" bus, so newbus finds it, allocates PCM_SOFTC_SIZE bytes
+ * for the snddev_info softc, and calls basound_pcm_attach().
+ */
+static int
+basound_pcm_probe(device_t dev)
 {
+	device_set_desc(dev, "PCM Audio");
+	return BUS_PROBE_DEFAULT;
+}
+
+static int
+basound_pcm_attach(device_t dev)
+{
+	struct snd_pcm *pcm = device_get_ivars(dev);
 	struct snd_card *card = pcm->card;
-	device_t dev = card->dev->bsddev;
 	struct snd_pcm_str *pstr_p = &pcm->streams[SNDRV_PCM_STREAM_PLAYBACK];
 	struct snd_pcm_str *pstr_c = &pcm->streams[SNDRV_PCM_STREAM_CAPTURE];
 	char status[SND_STATUSLEN];
 
+	/* dev's softc is PCM_SOFTC_SIZE bytes — safe for snddev_info */
 	pcm_init(dev, pcm);
 
-	snprintf(status, sizeof(status), "at %s", device_get_nameunit(dev));
+	snprintf(status, sizeof(status), "at %s",
+	    device_get_nameunit(device_get_parent(dev)));
 
-	/* Register the pcm device with FreeBSD */
-	if (pcm_register(dev, status)) {
+	if (pcm_register(dev, status) != 0) {
 		dev_err(card->dev, "pcm_register failed\n");
-		return -ENXIO;
+		return ENXIO;
 	}
 
-	/* Add playback channels */
 	if (pstr_p->substream_count > 0)
 		pcm_addchan(dev, PCMDIR_PLAY, &basound_chan_class, pcm);
-
-	/* Add capture channels */
 	if (pstr_c->substream_count > 0)
 		pcm_addchan(dev, PCMDIR_REC, &basound_chan_class, pcm);
 
 	return 0;
 }
+
+static int
+basound_pcm_detach(device_t dev)
+{
+	return pcm_unregister(dev);
+}
+
+static device_method_t basound_pcm_methods[] = {
+	DEVMETHOD(device_probe,		basound_pcm_probe),
+	DEVMETHOD(device_attach,	basound_pcm_attach),
+	DEVMETHOD(device_detach,	basound_pcm_detach),
+	DEVMETHOD_END
+};
+
+static driver_t basound_pcm_driver = {
+	"pcm",
+	basound_pcm_methods,
+	PCM_SOFTC_SIZE,
+};
+
+/*
+ * Register the PCM sub-driver under the "basound_hdsp" bus so that
+ * device_probe_and_attach() finds it when the parent creates a "pcm" child.
+ */
+DRIVER_MODULE(basound_pcm, basound_hdsp, basound_pcm_driver, 0, 0);
+
+/*
+ * basound_pcm_register — called from snd_card_register().
+ *
+ * Creates a "pcm" child device under the parent PCI device, stores the
+ * snd_pcm pointer as ivars, and lets newbus probe/attach it via the
+ * basound_pcm sub-driver above.  The child device gets PCM_SOFTC_SIZE bytes
+ * for its softc, so pcm_init() writes into snddev_info, not our own softc.
+ */
+int
+basound_pcm_register(struct snd_pcm *pcm)
+{
+	struct snd_card *card = pcm->card;
+	device_t parent = card->dev->bsddev;
+	device_t pcm_dev;
+	int err;
+
+	pcm_dev = device_add_child(parent, "pcm", -1);
+	if (pcm_dev == NULL) {
+		dev_err(card->dev, "device_add_child(pcm) failed\n");
+		return -ENXIO;
+	}
+
+	device_set_ivars(pcm_dev, pcm);
+	card->pcm_dev = pcm_dev;
+
+	err = device_probe_and_attach(pcm_dev);
+	if (err != 0) {
+		dev_err(card->dev, "pcm device attach failed: %d\n", err);
+		device_delete_child(parent, pcm_dev);
+		card->pcm_dev = NULL;
+		return -ENXIO;
+	}
+
+	return 0;
+}
+

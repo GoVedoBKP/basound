@@ -37,6 +37,12 @@ snd_card_free(struct snd_card *card)
 	if (card == NULL)
 		return 0;
 
+	if (card->pcm_dev != NULL) {
+		device_t parent = device_get_parent(card->pcm_dev);
+		device_delete_child(parent, card->pcm_dev);
+		card->pcm_dev = NULL;
+	}
+
 	free(card, M_ALSA);
 	return 0;
 }
