@@ -15,14 +15,86 @@ MALLOC_DECLARE(M_ALSA);
 #define PCI_DEVICE_ID_RME_H9652		0x3fc4
 
 static int
+hdsp_fifo_wait(struct hdsp *hdsp, int value, int timeout)
+{
+	int i;
+
+	for (i = 0; i < timeout; i++) {
+		if ((int)(hdsp_read(hdsp, HDSP_fifoStatus) & 0xff) <= value)
+			return 0;
+		DELAY(100); /* 100µs per iteration, matching Linux udelay(100) */
+	}
+	return -EIO;
+}
+
+/*
+ * Detect whether the attached I/O box is a Multiface or a Digiface.
+ *
+ * Two paths depending on whether firmware is already loaded:
+ *
+ * 1. DllError set (firmware not loaded): perform a JTAG S_LOAD probe.
+ *    The Digiface has an onboard ROM controller that drains the FIFO
+ *    almost instantly; the Multiface has no such controller so the FIFO
+ *    stalls.  Do NOT send VERSION_BIT — that activates the ROM firmware,
+ *    clears DllError, and would prevent our bitstream from being uploaded.
+ *
+ * 2. DllError clear (firmware already active, e.g. driver reload):
+ *    Read the I/O-box type from status2Register version bits.
+ */
+static void
 hdsp_get_iobox_version(struct hdsp *hdsp)
 {
-	uint32_t status = hdsp_read(hdsp, HDSP_statusRegister);
+	if ((hdsp_read(hdsp, HDSP_statusRegister) & HDSP_DllError) != 0) {
+		/* Firmware not loaded — JTAG probe */
+		hdsp_write(hdsp, HDSP_control2Reg, HDSP_S_LOAD);
+		hdsp_write(hdsp, HDSP_fifoData, 0);
 
-	if (status & 0x100)
-		return Multiface;
-	else
-		return Digiface;
+		if (hdsp_fifo_wait(hdsp, 0, HDSP_SHORT_WAIT) < 0) {
+			hdsp_write(hdsp, HDSP_control2Reg, HDSP_S300);
+			hdsp_write(hdsp, HDSP_control2Reg, HDSP_S_LOAD);
+		}
+
+		hdsp_write(hdsp, HDSP_control2Reg, HDSP_S200 | HDSP_PROGRAM);
+		hdsp_write(hdsp, HDSP_fifoData, 0);
+		if (hdsp_fifo_wait(hdsp, 0, HDSP_SHORT_WAIT) < 0)
+			goto set_multi;
+
+		hdsp_write(hdsp, HDSP_control2Reg, HDSP_S_LOAD);
+		hdsp_write(hdsp, HDSP_fifoData, 0);
+		if (hdsp_fifo_wait(hdsp, 0, HDSP_SHORT_WAIT) == 0) {
+			hdsp->io_type = Digiface;
+			dev_info(hdsp->card->dev, "Digiface detected\n");
+			return;
+		}
+
+		hdsp_write(hdsp, HDSP_control2Reg, HDSP_S300);
+		hdsp_write(hdsp, HDSP_control2Reg, HDSP_S_LOAD);
+		hdsp_write(hdsp, HDSP_fifoData, 0);
+		if (hdsp_fifo_wait(hdsp, 0, HDSP_SHORT_WAIT) == 0)
+			goto set_multi;
+
+		hdsp_write(hdsp, HDSP_control2Reg, HDSP_S300);
+		hdsp_write(hdsp, HDSP_control2Reg, HDSP_S_LOAD);
+		hdsp_write(hdsp, HDSP_fifoData, 0);
+		if (hdsp_fifo_wait(hdsp, 0, HDSP_SHORT_WAIT) < 0)
+			goto set_multi;
+
+		/* RPM — treat as unsupported, fall through to Multiface */
+		goto set_multi;
+	} else {
+		/* Firmware already loaded — read type from status2 bits */
+		uint32_t status2 = hdsp_read(hdsp, HDSP_status2Register);
+
+		if (status2 & HDSP_version1)
+			hdsp->io_type = Multiface;
+		else
+			hdsp->io_type = Digiface;
+		return;
+	}
+
+set_multi:
+	hdsp->io_type = Multiface;
+	dev_info(hdsp->card->dev, "Multiface detected\n");
 }
 
 int
@@ -47,7 +119,7 @@ snd_hdsp_create(struct snd_card *card, struct hdsp *hdsp)
 	/* Identify card type */
 	if (hdsp->pci->device == PCI_DEVICE_ID_RME_DIGIFACE ||
 	    hdsp->pci->device == PCI_DEVICE_ID_RME_MULTIFACE) {
-		hdsp->io_type = hdsp_get_iobox_version(hdsp);
+		hdsp_get_iobox_version(hdsp);
 	} else if (hdsp->pci->device == PCI_DEVICE_ID_RME_H9652) {
 		hdsp->io_type = H9652;
 	}
@@ -158,19 +230,6 @@ snd_hdsp_interrupt(void *arg)
 	}
 
 	mtx_unlock(&hdsp->lock);
-}
-
-static int
-hdsp_fifo_wait(struct hdsp *hdsp, int value, int timeout)
-{
-	int i;
-
-	for (i = 0; i < timeout; i++) {
-		if ((hdsp_read(hdsp, HDSP_fifoStatus) & 0xff) == value)
-			return 0;
-		DELAY(1000); /* 1ms delay */
-	}
-	return -EIO;
 }
 
 #define MINUS_INFINITY_GAIN 0

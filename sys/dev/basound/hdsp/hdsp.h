@@ -121,19 +121,28 @@ struct hdsp {
 #define HDSP_ClockModeMaster    (1<<4)
 #define HDSP_AudioInterruptEnable (1<<6)
 
-#define HDSP_DllError (1<<6)
-#define HDSP_S_PROGRAM 0x20
-#define HDSP_S_LOAD 0x40
-#define HDSP_S200 0x02
-#define HDSP_S300 0x03
-#define HDSP_PROGRAM 0x80
+#define HDSP_DllError (1<<21)
+#define HDSP_PROGRAM	        0x020
+#define HDSP_CONFIG_MODE_0	0x040
+#define HDSP_CONFIG_MODE_1	0x080
+#define HDSP_VERSION_BIT	(0x100 | HDSP_S_LOAD)
+#define HDSP_S200		0x800
+#define HDSP_S300		(0x100 | HDSP_S200)
+#define HDSP_CYCLIC_MODE	0x1000
+#define HDSP_S_PROGRAM		(HDSP_CYCLIC_MODE|HDSP_PROGRAM|HDSP_CONFIG_MODE_0)
+#define HDSP_S_LOAD		(HDSP_CYCLIC_MODE|HDSP_PROGRAM|HDSP_CONFIG_MODE_1)
+
+/* status2Register version bits (read after firmware load) */
+#define HDSP_version1		(1<<1)	/* set for Multiface */
+#define HDSP_version2		(1<<2)	/* set for RPM */
 
 #define DDS_NUMERATOR 110000000000ULL
 
 /* HDSP_FIRMWARE_SIZE is the firmware size in bytes (24413 uint32_t words) */
 #define HDSP_FIRMWARE_SIZE (24413 * 4)
-#define HDSP_SHORT_WAIT 1
-#define HDSP_LONG_WAIT 500
+/* Iteration counts for hdsp_fifo_wait() at 100µs per iteration */
+#define HDSP_SHORT_WAIT  30	/*   3 ms — for JTAG probe */
+#define HDSP_LONG_WAIT  5000	/* 500 ms — for firmware upload */
 
 /* PCI revision IDs used to select firmware variant */
 #define HDSP_PCI_REVISION_DSP		0x37	/* original Digiface/Multiface */
