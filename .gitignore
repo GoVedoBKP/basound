@@ -1,0 +1,22 @@
+# Build output
+*.o
+*.ko
+.depend.*
+export_syms
+
+# FreeBSD kernel build system generated interface headers
+bus_if.h
+channel_if.h
+device_if.h
+feeder_if.h
+mixer_if.h
+pci_if.h
+vnode_if.h
+vnode_if_newproto.h
+vnode_if_typedef.h
+opt_global.h
+
+# Machine-type symlinks created by bsd.kmod.mk
+i386
+machine
+x86
