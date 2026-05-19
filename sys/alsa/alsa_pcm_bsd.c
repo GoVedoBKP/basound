@@ -38,8 +38,15 @@ basound_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_chan
 	ch->runtime = malloc(sizeof(*ch->runtime), M_ALSA, M_WAITOK | M_ZERO);
 	substream->runtime = ch->runtime;
 
-	/* Allocate DMA-capable hardware buffer (4 MB). */
-	if (sndbuf_alloc(b, bus_get_dma_tag(pcm->card->dev->bsddev), 0,
+	/* Allocate DMA-capable hardware buffer using the card-level DMA tag.
+	 * bus_dmamem_alloc uses dmatag->maxsize (4 MB) as the allocation size,
+	 * which matches the size we pass to sndbuf_alloc. */
+	if (pcm->card->dmatag == NULL) {
+		free(ch->runtime, M_ALSA);
+		free(ch, M_ALSA);
+		return NULL;
+	}
+	if (sndbuf_alloc(b, pcm->card->dmatag, 0,
 	    4 * 1024 * 1024) != 0) {
 		free(ch->runtime, M_ALSA);
 		free(ch, M_ALSA);

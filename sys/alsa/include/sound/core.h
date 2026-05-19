@@ -27,6 +27,7 @@ struct snd_card {
 	void *private_data;
 	struct device *dev;
 	device_t pcm_dev;	/* FreeBSD pcm device */
+	bus_dma_tag_t dmatag;	/* card-level DMA tag for channel buffers */
 	STAILQ_HEAD(, snd_pcm) pcm_list;
 	STAILQ_HEAD(, snd_kcontrol) ctl_list;
 };
