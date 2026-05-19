@@ -100,6 +100,19 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 	return blocksize;
 }
 
+static uint32_t basound_fmtlist[] = {
+	SND_FORMAT(AFMT_S32_LE, 2, 0),
+	SND_FORMAT(AFMT_S16_LE, 2, 0),
+	0
+};
+static struct pcmchan_caps basound_caps = {32000, 192000, basound_fmtlist, 0};
+
+static struct pcmchan_caps *
+basound_chan_getcaps(kobj_t obj, void *data)
+{
+	return &basound_caps;
+}
+
 static int
 basound_chan_trigger(kobj_t obj, void *data, int go)
 {
@@ -129,6 +142,7 @@ basound_chan_getptr(kobj_t obj, void *data)
 static kobj_method_t basound_chan_methods[] = {
 	KOBJMETHOD(channel_init,		basound_chan_init),
 	KOBJMETHOD(channel_free,		basound_chan_free),
+	KOBJMETHOD(channel_getcaps,		basound_chan_getcaps),
 	KOBJMETHOD(channel_setformat,		basound_chan_setformat),
 	KOBJMETHOD(channel_setspeed,		basound_chan_setspeed),
 	KOBJMETHOD(channel_setblocksize,	basound_chan_setblocksize),
