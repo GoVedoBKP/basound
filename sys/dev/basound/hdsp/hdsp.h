@@ -118,8 +118,21 @@ struct hdsp {
 #define HDSP_BufferID           (1<<26)
 
 #define HDSP_InitializationComplete (1<<0)
+#define HDSP_Start              (1<<0)  /* start DMA engine (control reg bit 0) */
+#define HDSP_Latency0           (1<<1)  /* interrupt period = 2^(latency+7) samples */
+#define HDSP_Latency1           (1<<2)
+#define HDSP_Latency2           (1<<3)
+#define HDSP_LatencyMask        (HDSP_Latency0|HDSP_Latency1|HDSP_Latency2)
 #define HDSP_ClockModeMaster    (1<<4)
-#define HDSP_AudioInterruptEnable (1<<6)
+#define HDSP_AudioInterruptEnable (1<<5)
+#define HDSP_SPDIFInputSelect0  (1<<14)
+#define HDSP_SPDIFInputCoaxial  (HDSP_SPDIFInputSelect0)
+#define HDSP_LineOut            (1<<24)
+
+/* Encode/decode latency field (bits 1-3 of control register).
+ * period_bytes = 1 << (decode_latency + 8).  Max latency=7 → 32768 bytes. */
+#define hdsp_encode_latency(x)  (((x)<<1) & HDSP_LatencyMask)
+#define hdsp_decode_latency(x)  (((x) & HDSP_LatencyMask) >> 1)
 
 #define HDSP_DllError (1<<21)
 #define HDSP_PROGRAM	        0x020
@@ -164,6 +177,9 @@ int hdsp_read_gain(struct hdsp *hdsp, int addr);
 int hdsp_write_gain(struct hdsp *hdsp, unsigned int addr, unsigned short data);
 void snd_hdsp_create_mixer(struct snd_card *card, struct hdsp *hdsp);
 void snd_hdsp_midi_work(struct work_struct *work);
+
+/* PCM operations table — registered via snd_pcm_set_ops() in snd_hdsp_create() */
+extern const struct snd_pcm_ops hdsp_pcm_ops;
 
 /* PCM operations */
 int snd_hdsp_hw_params(struct snd_pcm_substream *substream, void *hw_params);

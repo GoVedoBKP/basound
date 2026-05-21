@@ -42,7 +42,7 @@ snd_card_new(struct device *parent, int idx, const char *xid,
 	if (parent != NULL && parent->bsddev != NULL) {
 		if (bus_dma_tag_create(
 		    bus_get_dma_tag(parent->bsddev),	/* parent */
-		    2, 0,				/* align, boundary */
+		    0x10000, 0,				/* align=64KB, boundary=none */
 		    BUS_SPACE_MAXADDR_32BIT,		/* lowaddr */
 		    BUS_SPACE_MAXADDR,			/* highaddr */
 		    NULL, NULL,				/* filter */

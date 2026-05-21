@@ -109,7 +109,12 @@ snd_hdsp_create(struct snd_card *card, struct hdsp *hdsp)
 	hdsp->iobase = (void *)pci_resource_start(hdsp->pci, 0);
 
 	mtx_init(&hdsp->lock, "hdsp_lock", NULL, MTX_DEF);
-	
+
+	/* Seed the control register cache with master-clock mode so that
+	 * hdsp_set_rate() works and hardware writes after firmware load
+	 * don't clear critical configuration bits. */
+	hdsp->control_register = HDSP_ClockModeMaster;
+
 	/* Initialize audio_stream structures */
 	mtx_init(&hdsp->capture_stream.lock, "hdsp_capture_stream", NULL, MTX_DEF);
 	hdsp->capture_stream.state = AUDIO_STREAM_IDLE;
@@ -159,6 +164,11 @@ snd_hdsp_create(struct snd_card *card, struct hdsp *hdsp)
 	hdsp->playback_substream = pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream;
 	hdsp->capture_substream = pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream;
 
+	/* Register trigger/pointer callbacks so basound_chan_trigger and
+	 * basound_chan_getptr can reach our hardware implementation. */
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &hdsp_pcm_ops);
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE,  &hdsp_pcm_ops);
+
 	/* Initialize MIDI */
 	for (i = 0; i < 2; i++) {
 		hdsp->midi[i].hdsp = hdsp;
@@ -179,18 +189,21 @@ snd_hdsp_interrupt(void *arg)
 {
 	struct hdsp *hdsp = arg;
 	uint32_t status;
-	int audio;
+	int audio, midi0, midi1;
 
 	mtx_lock(&hdsp->lock);
 
 	status = hdsp_read(hdsp, HDSP_statusRegister);
-	audio = status & HDSP_audioIRQPending;
+	audio  = status & HDSP_audioIRQPending;
+	midi0  = status & HDSP_midi0IRQPending;
+	midi1  = status & HDSP_midi1IRQPending;
 
-	if (!audio) {
+	if (!audio && !midi0 && !midi1) {
 		mtx_unlock(&hdsp->lock);
 		return;
 	}
 
+	/* Acknowledge the interrupt to the hardware before doing anything else. */
 	hdsp_write(hdsp, HDSP_interruptConfirmation, 0);
 
 	if (!(hdsp->state & HDSP_InitializationComplete)) {
@@ -198,47 +211,24 @@ snd_hdsp_interrupt(void *arg)
 		return;
 	}
 
+	/*
+	 * Release hdsp->lock BEFORE calling snd_pcm_period_elapsed.
+	 * snd_pcm_period_elapsed → chn_intr acquires CHN_LOCK.
+	 * basound_chan_trigger (called with CHN_LOCK held) acquires hdsp->lock.
+	 * Holding hdsp->lock while trying to acquire CHN_LOCK would invert
+	 * that ordering and deadlock on SMP.
+	 */
+	mtx_unlock(&hdsp->lock);
+
 	if (audio) {
-		/* Update position from hardware status register */
-		if (hdsp->running != 0) {
-			uint32_t buffer_position = (status & HDSP_BufferPositionMask) >> 6;
-			unsigned long position = buffer_position;
-			size_t period_bytes = 0;
-
-			/* Read period_bytes from the active substream's runtime */
-			if (hdsp->capture_substream != NULL &&
-			    hdsp->capture_substream->runtime != NULL)
-				period_bytes = hdsp->capture_substream->runtime->period_bytes;
-			else if (hdsp->playback_substream != NULL &&
-			         hdsp->playback_substream->runtime != NULL)
-				period_bytes = hdsp->playback_substream->runtime->period_bytes;
-
-			if (position > 0 && period_bytes > 0)
-				position = (position * 4) % (period_bytes * 2);
-
-			/* Update audio_stream framework with current position */
-			audio_stream_update_position(&hdsp->playback_stream, position);
-			audio_stream_update_position(&hdsp->capture_stream, position);
-		}
-		
-		/* Notify FreeBSD PCM channels */
 		if (hdsp->capture_substream)
 			snd_pcm_period_elapsed(hdsp->capture_substream);
 		if (hdsp->playback_substream)
 			snd_pcm_period_elapsed(hdsp->playback_substream);
 	}
-	
-	/* MIDI handling */
-	if (status & HDSP_midi0IRQPending) {
-		/* Handle MIDI Port 0 */
-		schedule_work(&hdsp->midi_work);
-	}
-	if (status & HDSP_midi1IRQPending) {
-		/* Handle MIDI Port 1 */
-		schedule_work(&hdsp->midi_work);
-	}
 
-	mtx_unlock(&hdsp->lock);
+	if (midi0 || midi1)
+		schedule_work(&hdsp->midi_work);
 }
 
 #define MINUS_INFINITY_GAIN 0
@@ -358,8 +348,29 @@ snd_hdsp_upload_firmware(struct hdsp *hdsp)
 	dev_info(hdsp->card->dev, "finished firmware loading");
 	hdsp->state |= HDSP_InitializationComplete;
 
+	/* Apply the full default control register (matching Linux snd_hdsp_set_defaults):
+	 *   - HDSP_ClockModeMaster     : use internal clock
+	 *   - HDSP_SPDIFInputCoaxial   : coaxial SPDIF input
+	 *   - hdsp_encode_latency(7)   : hardware period = 2^(7+7) = 16384 samples
+	 *   - HDSP_LineOut             : enable analog line output
+	 * Program the DDS for 48 kHz immediately after so the hardware has a
+	 * valid clock before any trigger call. */
+	hdsp->control_register = HDSP_ClockModeMaster |
+	                         HDSP_SPDIFInputCoaxial |
+	                         hdsp_encode_latency(7) |
+	                         HDSP_LineOut;
+	hdsp_write(hdsp, HDSP_controlRegister, hdsp->control_register);
+	hdsp_set_rate(hdsp, 48000, 1);
+
 	return 0;
 }
+
+const struct snd_pcm_ops hdsp_pcm_ops = {
+	.hw_params = snd_hdsp_hw_params,
+	.prepare   = snd_hdsp_prepare,
+	.trigger   = snd_hdsp_trigger,
+	.pointer   = snd_hdsp_pointer,
+};
 
 int
 snd_hdsp_hw_params(struct snd_pcm_substream *substream, void *hw_params)
@@ -378,7 +389,6 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct hdsp *hdsp = (struct hdsp *)substream->pcm->private_data;
 	struct audio_stream *stream;
-	uint32_t control;
 	int stream_dir;
 
 	if (hdsp == NULL)
@@ -410,10 +420,15 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 					   (uint32_t)hdsp->capture_substream->runtime->dma_addr);
 			}
 			
-			/* Enable audio interrupts to start transfers */
-			control = hdsp_read(hdsp, HDSP_controlRegister);
-			hdsp_write(hdsp, HDSP_controlRegister, 
-				   control | HDSP_AudioInterruptEnable);
+			/* Enable audio interrupts and start DMA engine using
+			 * the cached control register so no previously
+			 * configured bits (e.g. ClockModeMaster, DDS rate)
+			 * are lost.  HDSP_controlRegister is write-only on
+			 * the hardware; reading it returns undefined data. */
+			hdsp->control_register |=
+			    HDSP_AudioInterruptEnable | HDSP_Start;
+			hdsp_write(hdsp, HDSP_controlRegister,
+				   hdsp->control_register);
 			
 			/* Update audio_stream framework state */
 			audio_stream_start(stream);
@@ -430,10 +445,11 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 			/* Update audio_stream framework state */
 			audio_stream_stop(stream);
 			
-			/* Disable audio interrupts to stop transfers */
-			control = hdsp_read(hdsp, HDSP_controlRegister);
-			hdsp_write(hdsp, HDSP_controlRegister, 
-				   control & ~HDSP_AudioInterruptEnable);
+			/* Stop DMA engine and disable audio interrupts */
+			hdsp->control_register &=
+			    ~(HDSP_AudioInterruptEnable | HDSP_Start);
+			hdsp_write(hdsp, HDSP_controlRegister,
+				   hdsp->control_register);
 			
 			/* Reset DMA pointer to beginning of buffer */
 			hdsp_write(hdsp, HDSP_resetPointer, 0);
@@ -460,44 +476,26 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 	}
 }
 
+/*
+ * snd_hdsp_pointer — called by basound_chan_getptr, which is called from
+ * chn_intr (holding CHN_LOCK).  Must NOT acquire hdsp->lock here because
+ * the trigger path holds CHN_LOCK when it acquires hdsp->lock; inverting
+ * that order causes an SMP deadlock.
+ *
+ * Use the coarse HDSP_BufferID bit (bit 26 of the status register) to
+ * determine which half of the double buffer the hardware is currently in.
+ * Returns 0 (first half) or period_bytes (second half) as a byte offset,
+ * matching the non-precise-ptr mode of the upstream Linux driver.
+ */
 unsigned long
 snd_hdsp_pointer(struct snd_pcm_substream *substream)
 {
 	struct hdsp *hdsp = (struct hdsp *)substream->pcm->private_data;
-	struct audio_stream *stream;
-	unsigned long position = 0;
 	uint32_t status;
-	uint32_t buffer_position;
-	int stream_dir;
-	size_t period_bytes;
 
-	if (hdsp == NULL || substream->runtime == NULL)
+	if (hdsp == NULL || !hdsp->running || substream->runtime == NULL)
 		return 0;
 
-	period_bytes = substream->runtime->period_bytes;
-
-	/* Determine which stream (playback or capture) */
-	stream_dir = substream->stream;
-	stream = (stream_dir == SNDRV_PCM_STREAM_PLAYBACK) ? 
-		 &hdsp->playback_stream : &hdsp->capture_stream;
-
-	mtx_lock(&hdsp->lock);
-	
-	if (hdsp->running != 0 && period_bytes > 0) {
-		/* Read current buffer position from HDSP hardware */
-		status = hdsp_read(hdsp, HDSP_statusRegister);
-		
-		/* Extract buffer position counter from status register (bits 6-15).
-		 * Multiply by 4 to convert hardware counter units to bytes
-		 * (each unit = one 32-bit sample across all channels), then wrap
-		 * within the double-buffer (2 × period_bytes). */
-		buffer_position = (status & HDSP_BufferPositionMask) >> 6;
-		position = (buffer_position * 4) % (period_bytes * 2);
-		
-		/* Update audio_stream framework with actual position */
-		audio_stream_update_position(stream, position);
-	}
-	
-	mtx_unlock(&hdsp->lock);
-	return position;
+	status = hdsp_read(hdsp, HDSP_statusRegister);
+	return (status & HDSP_BufferID) ? substream->runtime->period_bytes : 0;
 }
