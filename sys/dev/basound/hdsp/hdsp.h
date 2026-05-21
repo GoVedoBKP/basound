@@ -82,7 +82,7 @@ struct hdsp {
 	unsigned short        firmware_rev;
 	unsigned short        state;
 	
-	size_t                period_bytes;
+	size_t                period_bytes;	/* kept for compat; prefer runtime->period_bytes */
 	unsigned char         max_channels;
 	unsigned char         ss_in_channels;
 	unsigned char         ss_out_channels;

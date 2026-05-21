@@ -58,9 +58,9 @@ static inline int audio_stream_start(struct audio_stream *stream)
 	int err = 0;
 	
 	mtx_lock(&stream->lock);
-	if (stream->state != AUDIO_STREAM_PREPARED) {
+	if (stream->state == AUDIO_STREAM_RUNNING) {
 		mtx_unlock(&stream->lock);
-		return -EINVAL;
+		return 0;
 	}
 	
 	if (stream->start) {
@@ -143,8 +143,11 @@ static inline int audio_stream_resume(struct audio_stream *stream)
 static inline void audio_stream_update_position(struct audio_stream *stream, 
 						  unsigned long new_pos)
 {
+	unsigned long buf_size;
+
 	mtx_lock(&stream->lock);
-	stream->position = new_pos % (stream->period_size * stream->periods);
+	buf_size = stream->period_size * stream->periods;
+	stream->position = (buf_size > 0) ? (new_pos % buf_size) : new_pos;
 	mtx_unlock(&stream->lock);
 }
 

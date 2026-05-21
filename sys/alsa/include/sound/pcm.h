@@ -29,6 +29,7 @@ struct snd_pcm_runtime {
 	/* Stream state tracking */
 	unsigned int state;
 	unsigned long dma_position;
+	size_t period_bytes;		/* Hardware DMA period in bytes; set by channel_setblocksize */
 	
 	/* Hardware capabilities and constraints */
 	struct {

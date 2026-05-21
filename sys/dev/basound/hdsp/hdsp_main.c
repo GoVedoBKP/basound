@@ -6,6 +6,7 @@
 
 #include "hdsp.h"
 #include "hdsp_fw.h"
+#include <sound/pcm_params.h>
 
 MALLOC_DECLARE(M_ALSA);
 
@@ -202,11 +203,19 @@ snd_hdsp_interrupt(void *arg)
 		if (hdsp->running != 0) {
 			uint32_t buffer_position = (status & HDSP_BufferPositionMask) >> 6;
 			unsigned long position = buffer_position;
-			
-			if (position > 0 && hdsp->period_bytes > 0) {
-				position = (position * 4) % (hdsp->period_bytes * 2);
-			}
-			
+			size_t period_bytes = 0;
+
+			/* Read period_bytes from the active substream's runtime */
+			if (hdsp->capture_substream != NULL &&
+			    hdsp->capture_substream->runtime != NULL)
+				period_bytes = hdsp->capture_substream->runtime->period_bytes;
+			else if (hdsp->playback_substream != NULL &&
+			         hdsp->playback_substream->runtime != NULL)
+				period_bytes = hdsp->playback_substream->runtime->period_bytes;
+
+			if (position > 0 && period_bytes > 0)
+				position = (position * 4) % (period_bytes * 2);
+
 			/* Update audio_stream framework with current position */
 			audio_stream_update_position(&hdsp->playback_stream, position);
 			audio_stream_update_position(&hdsp->capture_stream, position);
@@ -364,21 +373,6 @@ snd_hdsp_prepare(struct snd_pcm_substream *substream)
 	/* Prepare hardware for playback/capture */
 	return 0;
 }
-
-static unsigned int
-hdsp_hw_pointer(struct hdsp *hdsp)
-{
-	int position;
-
-	position = hdsp_read(hdsp, HDSP_statusRegister);
-
-	/* Assume precise_ptr is always true for now */
-	position &= HDSP_BufferPositionMask;
-	position /= 4;
-	position &= (hdsp->period_bytes/2) - 1;
-	return position;
-}
-
 int
 snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 {
@@ -398,7 +392,7 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 	mtx_lock(&hdsp->lock);
 	
 	switch (cmd) {
-	case 1: /* SNDRV_PCM_TRIGGER_START */
+	case SNDRV_PCM_TRIGGER_START:
 		/* Start HDSP hardware streaming */
 		if (hdsp->running == 0) {
 			/* Program DMA buffer addresses from substream runtimes.
@@ -430,7 +424,7 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 		mtx_unlock(&hdsp->lock);
 		return 0;
 		
-	case 0: /* SNDRV_PCM_TRIGGER_STOP */
+	case SNDRV_PCM_TRIGGER_STOP:
 		/* Stop HDSP hardware streaming */
 		if (hdsp->running != 0) {
 			/* Update audio_stream framework state */
@@ -450,12 +444,12 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 		mtx_unlock(&hdsp->lock);
 		return 0;
 		
-	case 3: /* SNDRV_PCM_TRIGGER_PAUSE_PUSH */
+	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		audio_stream_pause(stream);
 		mtx_unlock(&hdsp->lock);
 		return 0;
 		
-	case 4: /* SNDRV_PCM_TRIGGER_PAUSE_RELEASE */
+	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		audio_stream_resume(stream);
 		mtx_unlock(&hdsp->lock);
 		return 0;
@@ -475,9 +469,12 @@ snd_hdsp_pointer(struct snd_pcm_substream *substream)
 	uint32_t status;
 	uint32_t buffer_position;
 	int stream_dir;
+	size_t period_bytes;
 
-	if (hdsp == NULL)
+	if (hdsp == NULL || substream->runtime == NULL)
 		return 0;
+
+	period_bytes = substream->runtime->period_bytes;
 
 	/* Determine which stream (playback or capture) */
 	stream_dir = substream->stream;
@@ -486,25 +483,16 @@ snd_hdsp_pointer(struct snd_pcm_substream *substream)
 
 	mtx_lock(&hdsp->lock);
 	
-	if (hdsp->running != 0 && hdsp->period_bytes > 0) {
+	if (hdsp->running != 0 && period_bytes > 0) {
 		/* Read current buffer position from HDSP hardware */
 		status = hdsp_read(hdsp, HDSP_statusRegister);
 		
-		/* Extract buffer position from status register (bits 6-15) */
+		/* Extract buffer position counter from status register (bits 6-15).
+		 * Multiply by 4 to convert hardware counter units to bytes
+		 * (each unit = one 32-bit sample across all channels), then wrap
+		 * within the double-buffer (2 × period_bytes). */
 		buffer_position = (status & HDSP_BufferPositionMask) >> 6;
-		
-		/* Convert hardware position (in samples) to frames
-		 * Hardware gives us position, we need to convert to ALSA frame offset
-		 * Each frame is period_bytes long
-		 */
-		position = buffer_position;
-		
-		/* Ensure position doesn't exceed buffer size
-		 * Typical ring buffer is 2 periods
-		 */
-		if (position > 0) {
-			position = (position * 4) % (hdsp->period_bytes * 2);
-		}
+		position = (buffer_position * 4) % (period_bytes * 2);
 		
 		/* Update audio_stream framework with actual position */
 		audio_stream_update_position(stream, position);

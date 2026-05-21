@@ -50,9 +50,9 @@
 #define SNDRV_PCM_RATE_176400		(1 << 11)
 #define SNDRV_PCM_RATE_192000		(1 << 12)
 
-/* PCM trigger command */
-#define SNDRV_PCM_TRIGGER_START		0
-#define SNDRV_PCM_TRIGGER_STOP		1
+/* PCM trigger commands — must match Linux ALSA uapi/sound/asound.h */
+#define SNDRV_PCM_TRIGGER_STOP		0
+#define SNDRV_PCM_TRIGGER_START		1
 #define SNDRV_PCM_TRIGGER_PAUSE_PUSH	3
 #define SNDRV_PCM_TRIGGER_PAUSE_RELEASE	4
 

@@ -8,6 +8,7 @@
 #include <dev/sound/pcm/sound.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
+#include <sound/pcm_params.h>
 #include "alsa_pcm_bsd.h"
 #include "channel_if.h"
 
@@ -97,6 +98,8 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	struct basound_chan *ch = data;
 	ch->blocksize = blocksize;
+	if (ch->substream != NULL && ch->substream->runtime != NULL)
+		ch->substream->runtime->period_bytes = blocksize;
 	return blocksize;
 }
 
@@ -119,10 +122,32 @@ basound_chan_trigger(kobj_t obj, void *data, int go)
 	struct basound_chan *ch = data;
 	struct snd_pcm_substream *substream = ch->substream;
 	const struct snd_pcm_ops *ops = substream->pstr->ops;
+	int alsa_cmd;
+
+	/*
+	 * PCMTRIG_EMLDMAWR / PCMTRIG_EMLDMARD are called from the ISR
+	 * to advance software DMA pointers on non-DMA hardware.  The
+	 * HDSP has real DMA and does not need software pointer bumping,
+	 * so silently ignore these.
+	 */
+	if (!PCMTRIG_COMMON(go))
+		return 0;
+
+	switch (go) {
+	case PCMTRIG_START:
+		alsa_cmd = SNDRV_PCM_TRIGGER_START;
+		break;
+	case PCMTRIG_STOP:
+	case PCMTRIG_ABORT:
+		alsa_cmd = SNDRV_PCM_TRIGGER_STOP;
+		break;
+	default:
+		return 0;
+	}
 
 	if (ops && ops->trigger)
-		return ops->trigger(substream, go);
-	
+		return ops->trigger(substream, alsa_cmd);
+
 	return 0;
 }
 
