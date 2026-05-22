@@ -131,30 +131,34 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 	struct basound_chan *ch = data;
 	struct snd_pcm_substream *substream = ch->substream;
 	const struct snd_pcm_ops *ops = substream->pstr->ops;
+	uint32_t channels = AFMT_CHANNEL(ch->format);
+	uint32_t bps = (ch->format & AFMT_S32_LE) ? 4 : 2;
+	uint32_t frames;
 
-	/* The HDSP hardware has a minimum period of 64 frames.
-	 * At 16-bit stereo (4 bytes/frame), this is 256 bytes.
-	 * At 32-bit stereo (8 bytes/frame), this is 512 bytes.
-	 * We force a minimum of 256 bytes to avoid hardware/buffer mismatch. */
-	if (blocksize < 256)
-		blocksize = 256;
+	if (channels == 0) channels = 2;
 
+	/* 1. Calculate how many frames this blocksize represents */
+	frames = blocksize / (channels * bps);
+
+	/* 2. Round up to nearest supported HDSP latency (power of 2, 64 to 8192) */
+	if (frames < 64) frames = 64;
+	if (frames > 8192) frames = 8192;
+	
+	uint32_t p2frames = 64;
+	while (p2frames < frames) p2frames <<= 1;
+	frames = p2frames;
+
+	/* 3. Recalculate actual blocksize */
+	blocksize = frames * channels * bps;
 	ch->blocksize = blocksize;
+
 	if (substream->runtime != NULL) {
 		substream->runtime->period_bytes = blocksize;
 		if (ops && ops->hw_params)
 			ops->hw_params(substream, NULL);
 	}
 
-	/* Set the logical buffer to exactly 2 blocks so that chn_intr_locked's
-	 * delta formula:  (bufsize + hwptr - old) % bufsize
-	 * gives the correct period size (blocksize) when hwptr wraps from
-	 * blocksize back to 0.  sndbuf_resize() updates blkcnt/blksz/bufsize
-	 * without touching maxsize or the physical DMA buffer pointer, so
-	 * subsequent chn_resizebuf() calls are never clamped by a shrunken
-	 * maxsize.  The channel lock is released by chn_resizebuf() before
-	 * calling CHANNEL_SETBLOCKSIZE, so sndbuf_resize() can safely
-	 * re-acquire it internally. */
+	/* Set the logical buffer to exactly 2 blocks for double-buffering. */
 	sndbuf_resize(ch->buffer, 2, blocksize);
 
 	return blocksize;
@@ -171,10 +175,16 @@ basound_chan_setfragments(kobj_t obj, void *data, uint32_t blocksize, uint32_t b
 static uint32_t basound_fmtlist[] = {
 	SND_FORMAT(AFMT_S32_LE, 2, 0),
 	SND_FORMAT(AFMT_S16_LE, 2, 0),
+	SND_FORMAT(AFMT_S32_LE, 1, 0),
+	SND_FORMAT(AFMT_S16_LE, 1, 0),
+	SND_FORMAT(AFMT_S32_LE, 8, 0),
+	SND_FORMAT(AFMT_S16_LE, 8, 0),
 	SND_FORMAT(AFMT_S32_LE, 18, 0),
 	SND_FORMAT(AFMT_S16_LE, 18, 0),
 	SND_FORMAT(AFMT_S32_LE, 26, 0),
 	SND_FORMAT(AFMT_S16_LE, 26, 0),
+	SND_FORMAT(AFMT_S32_LE, 32, 0),
+	SND_FORMAT(AFMT_S16_LE, 32, 0),
 	0
 };
 static struct pcmchan_caps basound_caps = {32000, 192000, basound_fmtlist, DSP_CAP_DUPLEX};
