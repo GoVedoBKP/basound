@@ -11,6 +11,7 @@
 #include <sound/pcm_params.h>
 #include "alsa_pcm_bsd.h"
 #include "channel_if.h"
+#include "feeder_if.h"
 
 MALLOC_DECLARE(M_ALSA);
 
@@ -34,6 +35,7 @@ basound_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_chan
 	ch = malloc(sizeof(*ch), M_ALSA, M_WAITOK | M_ZERO);
 	ch->substream = substream;
 	ch->channel = c;
+	ch->buffer = b;
 	substream->private_data = ch;
 
 	ch->runtime = malloc(sizeof(*ch->runtime), M_ALSA, M_WAITOK | M_ZERO);
@@ -61,6 +63,11 @@ basound_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_chan
 	substream->runtime->dma_addr  = sndbuf_getbufaddr(b);
 	substream->runtime->dma_bytes = sndbuf_getsize(b);
 
+	/* Initialize with safe defaults so that hw_params can be called. */
+	ch->format = SND_FORMAT(AFMT_S16_LE, 2, 0);
+	ch->speed = 48000;
+	ch->blocksize = 4096;
+
 	return ch;
 }
 
@@ -81,7 +88,14 @@ static int
 basound_chan_setformat(kobj_t obj, void *data, uint32_t format)
 {
 	struct basound_chan *ch = data;
+	struct snd_pcm_substream *substream = ch->substream;
+	const struct snd_pcm_ops *ops = substream->pstr->ops;
+
 	ch->format = format;
+	if (substream->runtime != NULL) {
+		if (ops && ops->hw_params)
+			ops->hw_params(substream, NULL);
+	}
 	return 0;
 }
 
@@ -89,31 +103,139 @@ static uint32_t
 basound_chan_setspeed(kobj_t obj, void *data, uint32_t speed)
 {
 	struct basound_chan *ch = data;
+	struct snd_pcm_substream *substream = ch->substream;
+	const struct snd_pcm_ops *ops = substream->pstr->ops;
+
 	ch->speed = speed;
+	if (substream->runtime != NULL) {
+		if (ops && ops->prepare)
+			ops->prepare(substream);
+	}
 	return speed;
 }
-
 static uint32_t
 basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 {
 	struct basound_chan *ch = data;
+	struct snd_pcm_substream *substream = ch->substream;
+	const struct snd_pcm_ops *ops = substream->pstr->ops;
+
+	/* The HDSP hardware has a minimum period of 64 frames.
+	 * At 16-bit stereo (4 bytes/frame), this is 256 bytes.
+	 * At 32-bit stereo (8 bytes/frame), this is 512 bytes.
+	 * We force a minimum of 256 bytes to avoid hardware/buffer mismatch. */
+	if (blocksize < 256)
+		blocksize = 256;
+
 	ch->blocksize = blocksize;
-	if (ch->substream != NULL && ch->substream->runtime != NULL)
-		ch->substream->runtime->period_bytes = blocksize;
+	if (substream->runtime != NULL) {
+		substream->runtime->period_bytes = blocksize;
+		if (ops && ops->hw_params)
+			ops->hw_params(substream, NULL);
+	}
+
+	/* Adjust the active buffer size to exactly 2 blocks for double-buffering.
+	 * This ensures that FreeBSD's latency calculation (based on total buffer
+	 * size) matches the actual hardware interrupt interval. */
+	sndbuf_setup(ch->buffer, sndbuf_getbuf(ch->buffer), 2 * blocksize);
+
 	return blocksize;
+}
+
+static int
+basound_chan_setfragments(kobj_t obj, void *data, uint32_t blocksize, uint32_t blockcount)
+{
+	/* We force double-buffering for hardware compatibility */
+	basound_chan_setblocksize(obj, data, blocksize);
+	return 0;
 }
 
 static uint32_t basound_fmtlist[] = {
 	SND_FORMAT(AFMT_S32_LE, 2, 0),
 	SND_FORMAT(AFMT_S16_LE, 2, 0),
+	SND_FORMAT(AFMT_S32_LE, 18, 0),
+	SND_FORMAT(AFMT_S16_LE, 18, 0),
+	SND_FORMAT(AFMT_S32_LE, 26, 0),
+	SND_FORMAT(AFMT_S16_LE, 26, 0),
 	0
 };
-static struct pcmchan_caps basound_caps = {32000, 192000, basound_fmtlist, 0};
+static struct pcmchan_caps basound_caps = {32000, 192000, basound_fmtlist, DSP_CAP_DUPLEX};
 
 static struct pcmchan_caps *
 basound_chan_getcaps(kobj_t obj, void *data)
 {
 	return &basound_caps;
+}
+
+static struct pcmchan_matrix basound_matrix_18 = {
+	.id = 100,
+	.channels = 18,
+	.ext = 0,
+	.map = {
+		{ .type = 0,  .members = (1 << 0)  },
+		{ .type = 1,  .members = (1 << 1)  },
+		{ .type = 2,  .members = (1 << 2)  },
+		{ .type = 3,  .members = (1 << 3)  },
+		{ .type = 4,  .members = (1 << 4)  },
+		{ .type = 5,  .members = (1 << 5)  },
+		{ .type = 6,  .members = (1 << 6)  },
+		{ .type = 7,  .members = (1 << 7)  },
+		{ .type = 8,  .members = (1 << 8)  },
+		{ .type = 9,  .members = (1 << 9)  },
+		{ .type = 10, .members = (1 << 10) },
+		{ .type = 11, .members = (1 << 11) },
+		{ .type = 12, .members = (1 << 12) },
+		{ .type = 13, .members = (1 << 13) },
+		{ .type = 14, .members = (1 << 14) },
+		{ .type = 15, .members = (1 << 15) },
+		{ .type = 16, .members = (1 << 16) },
+		{ .type = 17, .members = (1 << 17) },
+		{ .type = 18, .members = 0         }
+	},
+	.mask = 0x3ffff,
+	.offset = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 }
+};
+
+static struct pcmchan_matrix basound_matrix_26 = {
+	.id = 101,
+	.channels = 26,
+	.ext = 0,
+	.map = {
+		{ .type = 0,  .members = (1 << 0)  },
+		{ .type = 1,  .members = (1 << 1)  },
+		{ .type = 2,  .members = (1 << 2)  },
+		{ .type = 3,  .members = (1 << 3)  },
+		{ .type = 4,  .members = (1 << 4)  },
+		{ .type = 5,  .members = (1 << 5)  },
+		{ .type = 6,  .members = (1 << 6)  },
+		{ .type = 7,  .members = (1 << 7)  },
+		{ .type = 8,  .members = (1 << 8)  },
+		{ .type = 9,  .members = (1 << 9)  },
+		{ .type = 10, .members = (1 << 10) },
+		{ .type = 11, .members = (1 << 11) },
+		{ .type = 12, .members = (1 << 12) },
+		{ .type = 13, .members = (1 << 13) },
+		{ .type = 14, .members = (1 << 14) },
+		{ .type = 15, .members = (1 << 15) },
+		{ .type = 16, .members = (1 << 16) },
+		{ .type = 17, .members = (1 << 17) },
+		{ .type = 18, .members = 0         }
+	},
+	.mask = 0x3ffff,
+	.offset = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 }
+};
+
+static struct pcmchan_matrix *
+basound_chan_getmatrix(kobj_t obj, void *data, uint32_t format)
+{
+	uint32_t channels = AFMT_CHANNEL(format);
+
+	if (channels == 18)
+		return &basound_matrix_18;
+	if (channels == 26)
+		return &basound_matrix_26;
+
+	return NULL;
 }
 
 static int
@@ -124,17 +246,13 @@ basound_chan_trigger(kobj_t obj, void *data, int go)
 	const struct snd_pcm_ops *ops = substream->pstr->ops;
 	int alsa_cmd;
 
-	/*
-	 * PCMTRIG_EMLDMAWR / PCMTRIG_EMLDMARD are called from the ISR
-	 * to advance software DMA pointers on non-DMA hardware.  The
-	 * HDSP has real DMA and does not need software pointer bumping,
-	 * so silently ignore these.
-	 */
-	if (!PCMTRIG_COMMON(go))
+	if (go == PCMTRIG_EMLDMAWR || go == PCMTRIG_EMLDMARD)
 		return 0;
 
 	switch (go) {
 	case PCMTRIG_START:
+		if (ops && ops->prepare)
+			ops->prepare(substream);
 		alsa_cmd = SNDRV_PCM_TRIGGER_START;
 		break;
 	case PCMTRIG_STOP:
@@ -168,9 +286,11 @@ static kobj_method_t basound_chan_methods[] = {
 	KOBJMETHOD(channel_init,		basound_chan_init),
 	KOBJMETHOD(channel_free,		basound_chan_free),
 	KOBJMETHOD(channel_getcaps,		basound_chan_getcaps),
+	KOBJMETHOD(channel_getmatrix,		basound_chan_getmatrix),
 	KOBJMETHOD(channel_setformat,		basound_chan_setformat),
 	KOBJMETHOD(channel_setspeed,		basound_chan_setspeed),
 	KOBJMETHOD(channel_setblocksize,	basound_chan_setblocksize),
+	KOBJMETHOD(channel_setfragments,	basound_chan_setfragments),
 	KOBJMETHOD(channel_trigger,		basound_chan_trigger),
 	KOBJMETHOD(channel_getptr,		basound_chan_getptr),
 	KOBJMETHOD_END
@@ -208,6 +328,15 @@ basound_pcm_attach(device_t dev)
 
 	/* dev's softc is PCM_SOFTC_SIZE bytes — safe for snddev_info */
 	pcm_init(dev, pcm);
+
+	/*
+	 * HDSP is a professional multi-channel audio interface.  Enable
+	 * bitperfect mode so that the channel count is not clamped to
+	 * SND_CHN_MAX and no feeder conversions are inserted.  This lets
+	 * JACK and other pro-audio clients open /dev/dspN with the full
+	 * 18-channel (Multiface) or 26-channel (Digiface) configuration.
+	 */
+	pcm_setflags(dev, pcm_getflags(dev) | SD_F_BITPERFECT);
 
 	snprintf(status, sizeof(status), "at %s",
 	    device_get_nameunit(device_get_parent(dev)));
