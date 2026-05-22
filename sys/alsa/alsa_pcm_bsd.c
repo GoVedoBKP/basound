@@ -338,6 +338,18 @@ basound_pcm_attach(device_t dev)
 	 */
 	pcm_setflags(dev, pcm_getflags(dev) | SD_F_BITPERFECT);
 
+	/*
+	 * Add channels before pcm_register().  pcm_register() inspects
+	 * playcount/reccount and sets SD_F_SIMPLEX when either is zero,
+	 * which prevents a second open() on the same device in the opposite
+	 * direction (errno EOPNOTSUPP).  All reference drivers follow the
+	 * same pcm_init → pcm_addchan → pcm_register ordering.
+	 */
+	if (pstr_p->substream_count > 0)
+		pcm_addchan(dev, PCMDIR_PLAY, &basound_chan_class, pcm);
+	if (pstr_c->substream_count > 0)
+		pcm_addchan(dev, PCMDIR_REC, &basound_chan_class, pcm);
+
 	snprintf(status, sizeof(status), "at %s",
 	    device_get_nameunit(device_get_parent(dev)));
 
@@ -345,11 +357,6 @@ basound_pcm_attach(device_t dev)
 		dev_err(card->dev, "pcm_register failed\n");
 		return ENXIO;
 	}
-
-	if (pstr_p->substream_count > 0)
-		pcm_addchan(dev, PCMDIR_PLAY, &basound_chan_class, pcm);
-	if (pstr_c->substream_count > 0)
-		pcm_addchan(dev, PCMDIR_REC, &basound_chan_class, pcm);
 
 	return 0;
 }
