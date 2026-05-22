@@ -12,6 +12,7 @@
 #include "alsa_pcm_bsd.h"
 #include "channel_if.h"
 #include "feeder_if.h"
+#include "hdsp.h"
 
 MALLOC_DECLARE(M_ALSA);
 
@@ -63,8 +64,16 @@ basound_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_chan
 	substream->runtime->dma_addr  = sndbuf_getbufaddr(b);
 	substream->runtime->dma_bytes = sndbuf_getsize(b);
 
-	/* Initialize with safe defaults so that hw_params can be called. */
-	ch->format = SND_FORMAT(AFMT_S16_LE, 2, 0);
+	/* Initialize to the actual hardware format: HDSP always DMA's 32-bit
+	 * samples at the fixed channel count determined by the firmware type.
+	 * chn_init() calls sndbuf_setfmt(bufhard, c->format) after CHANNEL_INIT
+	 * returns, so setting c->format here makes feeder_chain() see the
+	 * correct hw channel count when it reads sndbuf_getfmt(bufhard). */
+	struct hdsp *hdsp = pcm->private_data;
+	int hw_channels = (dir == PCMDIR_PLAY) ?
+	    hdsp->ss_out_channels : hdsp->ss_in_channels;
+	ch->format = SND_FORMAT(AFMT_S32_LE, hw_channels, 0);
+	c->format  = SND_FORMAT(AFMT_S32_LE, hw_channels, 0);
 	ch->speed = 48000;
 	ch->blocksize = 4096;
 
@@ -91,7 +100,10 @@ basound_chan_setformat(kobj_t obj, void *data, uint32_t format)
 	struct snd_pcm_substream *substream = ch->substream;
 	const struct snd_pcm_ops *ops = substream->pstr->ops;
 
+	printf("basound: setformat 0x%08x -> ch=%u\n", format, AFMT_CHANNEL(format));
+
 	ch->format = format;
+	sndbuf_setfmt(ch->buffer, format);
 	if (substream->runtime != NULL) {
 		if (ops && ops->hw_params)
 			ops->hw_params(substream, NULL);
@@ -134,10 +146,16 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 			ops->hw_params(substream, NULL);
 	}
 
-	/* Adjust the active buffer size to exactly 2 blocks for double-buffering.
-	 * This ensures that FreeBSD's latency calculation (based on total buffer
-	 * size) matches the actual hardware interrupt interval. */
-	sndbuf_setup(ch->buffer, sndbuf_getbuf(ch->buffer), 2 * blocksize);
+	/* Set the logical buffer to exactly 2 blocks so that chn_intr_locked's
+	 * delta formula:  (bufsize + hwptr - old) % bufsize
+	 * gives the correct period size (blocksize) when hwptr wraps from
+	 * blocksize back to 0.  sndbuf_resize() updates blkcnt/blksz/bufsize
+	 * without touching maxsize or the physical DMA buffer pointer, so
+	 * subsequent chn_resizebuf() calls are never clamped by a shrunken
+	 * maxsize.  The channel lock is released by chn_resizebuf() before
+	 * calling CHANNEL_SETBLOCKSIZE, so sndbuf_resize() can safely
+	 * re-acquire it internally. */
+	sndbuf_resize(ch->buffer, 2, blocksize);
 
 	return blocksize;
 }
@@ -229,13 +247,18 @@ static struct pcmchan_matrix *
 basound_chan_getmatrix(kobj_t obj, void *data, uint32_t format)
 {
 	uint32_t channels = AFMT_CHANNEL(format);
+	struct pcmchan_matrix *m;
 
 	if (channels == 18)
-		return &basound_matrix_18;
-	if (channels == 26)
-		return &basound_matrix_26;
+		m = &basound_matrix_18;
+	else if (channels == 26)
+		m = &basound_matrix_26;
+	else
+		m = NULL;
 
-	return NULL;
+	printf("basound: getmatrix fmt=0x%08x ch=%u -> %s\n",
+	    format, channels, m ? "found" : "NULL");
+	return m;
 }
 
 static int
@@ -337,6 +360,8 @@ basound_pcm_attach(device_t dev)
 	 * 18-channel (Multiface) or 26-channel (Digiface) configuration.
 	 */
 	pcm_setflags(dev, pcm_getflags(dev) | SD_F_BITPERFECT);
+	printf("basound: bitperfect flags=0x%08x SD_F_BITPERFECT=%d\n",
+	    pcm_getflags(dev), !!(pcm_getflags(dev) & SD_F_BITPERFECT));
 
 	/*
 	 * Add channels before pcm_register().  pcm_register() inspects

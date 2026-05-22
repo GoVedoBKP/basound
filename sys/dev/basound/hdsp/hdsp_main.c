@@ -7,6 +7,7 @@
 #include "hdsp.h"
 #include "hdsp_fw.h"
 #include <sound/pcm_params.h>
+#include "alsa_pcm_bsd.h"
 
 MALLOC_DECLARE(M_ALSA);
 
@@ -375,13 +376,57 @@ const struct snd_pcm_ops hdsp_pcm_ops = {
 int
 snd_hdsp_hw_params(struct snd_pcm_substream *substream, void *hw_params)
 {
-	return snd_pcm_lib_malloc_pages(substream, 4096 * 1024); /* 4MB buffer */
+	struct hdsp *hdsp = (struct hdsp *)substream->pcm->private_data;
+	struct basound_chan *ch = substream->private_data;
+	unsigned int frames, channels;
+	int latency;
+
+	if (ch == NULL || ch->format == 0 || ch->blocksize == 0)
+		return 0;
+
+	/* Calculate frames per period using actual channel count. */
+	channels = AFMT_CHANNEL(ch->format);
+	if (channels == 0)
+		channels = 2;
+
+	frames = ch->blocksize / (channels * ((ch->format & AFMT_S32_LE) ? 4 : 2));
+
+	/* Map requested frames to the nearest supported HDSP latency bits.
+	 * 0: 64, 1: 128, 2: 256, 3: 512, 4: 1024, 5: 2048, 6: 4096, 7: 8192. */
+	if (frames <= 64) latency = 0;
+	else if (frames <= 128)  latency = 1;
+	else if (frames <= 256)  latency = 2;
+	else if (frames <= 512)  latency = 3;
+	else if (frames <= 1024) latency = 4;
+	else if (frames <= 2048) latency = 5;
+	else if (frames <= 4096) latency = 6;
+	else latency = 7;
+
+	mtx_lock(&hdsp->lock);
+	hdsp->control_register &= ~HDSP_LatencyMask;
+	hdsp->control_register |= hdsp_encode_latency(latency);
+	
+	/* If already running, update the hardware immediately. */
+	if (hdsp->running) {
+		hdsp_write(hdsp, HDSP_controlRegister, hdsp->control_register);
+	}
+	mtx_unlock(&hdsp->lock);
+
+	dev_info(hdsp->card->dev, "set latency to %d frames (%d bytes)\n",
+	    1 << (latency + 6), ch->blocksize);
+
+	return 0;
 }
 
 int
 snd_hdsp_prepare(struct snd_pcm_substream *substream)
 {
-	/* Prepare hardware for playback/capture */
+	struct hdsp *hdsp = (struct hdsp *)substream->pcm->private_data;
+	struct basound_chan *ch = (struct basound_chan *)substream->private_data;
+
+	if (ch != NULL && ch->speed > 0)
+		hdsp_set_rate(hdsp, ch->speed, 0);
+
 	return 0;
 }
 int

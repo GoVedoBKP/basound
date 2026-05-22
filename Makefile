@@ -22,6 +22,7 @@ SRCS=	sys/dev/basound/basound.c \
 	device_if.h bus_if.h feeder_if.h mixer_if.h channel_if.h pci_if.h vnode_if.h
 
 CFLAGS+= -I${.CURDIR}/sys/alsa/include \
+	-I${.CURDIR}/sys/alsa \
 	-I${.CURDIR}/sys/dev/basound/hdsp \
 	-I${.CURDIR}/sys/dev/usb
 

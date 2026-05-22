@@ -8,6 +8,7 @@
 struct basound_chan {
 	struct snd_pcm_substream *substream;
 	struct pcm_channel *channel;
+	struct snd_dbuf *buffer;
 	struct snd_pcm_runtime *runtime;
 	uint32_t format;
 	uint32_t speed;
