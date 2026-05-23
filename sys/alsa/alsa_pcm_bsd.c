@@ -64,16 +64,20 @@ basound_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_chan
 	substream->runtime->dma_addr  = sndbuf_getbufaddr(b);
 	substream->runtime->dma_bytes = sndbuf_getsize(b);
 
-	/* Initialize to the actual hardware format: HDSP always DMA's 32-bit
-	 * samples at the fixed channel count determined by the firmware type.
-	 * chn_init() calls sndbuf_setfmt(bufhard, c->format) after CHANNEL_INIT
-	 * returns, so setting c->format here makes feeder_chain() see the
-	 * correct hw channel count when it reads sndbuf_getfmt(bufhard). */
-	struct hdsp *hdsp = pcm->private_data;
-	int hw_channels = (dir == PCMDIR_PLAY) ?
-	    hdsp->ss_out_channels : hdsp->ss_in_channels;
-	ch->format = SND_FORMAT(AFMT_S32_LE, hw_channels, 0);
-	c->format  = SND_FORMAT(AFMT_S32_LE, hw_channels, 0);
+	/* Initialize hardware format.  HDSP stores a struct hdsp * in
+	 * pcm->private_data with the exact channel count; other drivers
+	 * (e.g. USB Line6) leave private_data NULL and default to stereo. */
+	if (pcm->private_data != NULL) {
+		struct hdsp *hdsp = pcm->private_data;
+		int hw_channels = (dir == PCMDIR_PLAY) ?
+		    hdsp->ss_out_channels : hdsp->ss_in_channels;
+		ch->format = SND_FORMAT(AFMT_S32_LE, hw_channels, 0);
+		c->format  = SND_FORMAT(AFMT_S32_LE, hw_channels, 0);
+	} else {
+		/* Non-HDSP device (e.g. USB audio): stereo S16_LE */
+		ch->format = SND_FORMAT(AFMT_S16_LE, 2, 0);
+		c->format  = SND_FORMAT(AFMT_S16_LE, 2, 0);
+	}
 	ch->speed = 48000;
 	ch->blocksize = 4096;
 
@@ -416,10 +420,11 @@ static driver_t basound_pcm_driver = {
 };
 
 /*
- * Register the PCM sub-driver under the "basound_hdsp" bus so that
+ * Register the PCM sub-driver under every basound bus type so that
  * device_probe_and_attach() finds it when the parent creates a "pcm" child.
  */
-DRIVER_MODULE(basound_pcm, basound_hdsp, basound_pcm_driver, 0, 0);
+DRIVER_MODULE(basound_pcm, basound_hdsp,  basound_pcm_driver, 0, 0);
+DRIVER_MODULE(basound_pcm, basound_line6, basound_pcm_driver, 0, 0);
 
 /*
  * basound_pcm_register — called from snd_card_register().

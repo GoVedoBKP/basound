@@ -240,37 +240,20 @@ line6_pcm_close(struct snd_pcm_substream *substream)
 static int
 line6_pcm_hw_params(struct snd_pcm_substream *substream, void *hw_params)
 {
-	struct snd_pcm_runtime *runtime = substream->runtime;
-	int err;
-	
-	if (runtime == NULL)
-		return -ENOMEM;
-	
-	/* Validate parameters */
-	if (runtime->hw.rate_min == 0 || runtime->hw.rate_max == 0)
-		return -EINVAL;
-	
-	/* Allocate DMA buffer for audio data */
-	err = snd_pcm_lib_malloc_pages(substream, 
-				       runtime->hw.buffer_bytes_max);
-	if (err < 0)
-		return err;
-	
-	/* Verify allocation succeeded */
-	if (runtime->dma_area == NULL)
-		return -ENOMEM;
-	
-	/* Store hardware parameters */
-	runtime->dma_bytes = runtime->hw.buffer_bytes_max;
-	
+	/*
+	 * DMA memory is already managed by basound_chan_init via sndbuf_alloc;
+	 * runtime->dma_area/dma_addr/dma_bytes are set there.  Do not call
+	 * snd_pcm_lib_malloc_pages here — that would overwrite private_data
+	 * with a snd_dma_buffer pointer and corrupt the runtime state.
+	 */
 	return 0;
 }
 
 static int
 line6_pcm_hw_free(struct snd_pcm_substream *substream)
 {
-	/* Free allocated DMA buffers */
-	return snd_pcm_lib_free_pages(substream);
+	/* DMA buffers are owned by basound_chan_init/basound_chan_free */
+	return 0;
 }
 
 static int
@@ -281,8 +264,7 @@ line6_pcm_prepare(struct snd_pcm_substream *substream)
 	if (runtime == NULL || runtime->dma_area == NULL)
 		return -EINVAL;
 	
-	/* Initialize playback/record position to 0 */
-	runtime->dma_bytes = 0;
+	/* Reset playback/capture position */
 	runtime->dma_position = 0;
 	
 	return 0;
@@ -386,8 +368,8 @@ static const struct snd_pcm_ops line6_pcm_ops = {
 	.hw_params = line6_pcm_hw_params,
 	.hw_free = line6_pcm_hw_free,
 	.prepare = line6_pcm_prepare,
-	.trigger = NULL,
-	.pointer = NULL,
+	.trigger = line6_pcm_trigger,
+	.pointer = line6_pcm_pointer,
 };
 
 /* USB device probe routine */
@@ -535,6 +517,9 @@ static device_method_t line6_bsd_methods[] = {
 	DEVMETHOD(device_probe,		line6_bsd_probe),
 	DEVMETHOD(device_attach,	line6_bsd_attach),
 	DEVMETHOD(device_detach,	line6_bsd_detach),
+	/* Bus methods needed to host the "pcm" child device */
+	DEVMETHOD(bus_add_child,	bus_generic_add_child),
+	DEVMETHOD(bus_print_child,	bus_generic_print_child),
 	DEVMETHOD_END
 };
 
