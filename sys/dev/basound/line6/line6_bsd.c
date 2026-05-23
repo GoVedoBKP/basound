@@ -386,8 +386,8 @@ static const struct snd_pcm_ops line6_pcm_ops = {
 	.hw_params = line6_pcm_hw_params,
 	.hw_free = line6_pcm_hw_free,
 	.prepare = line6_pcm_prepare,
-	.trigger = line6_pcm_trigger,
-	.pointer = line6_pcm_pointer,
+	.trigger = NULL,
+	.pointer = NULL,
 };
 
 /* USB device probe routine */
