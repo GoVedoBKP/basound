@@ -103,9 +103,37 @@ struct hdsp_mixer_entry {
  * all writes complete.
  */
 
+/*
+ * HDSP_IOCTL_GET_LEVELS
+ *
+ * Returns instantaneous peak and RMS levels read directly from the
+ * hardware BAR registers (no FIFO involved — safe to call at any time).
+ * The hardware maintains peak-hold accumulators that are reset on each
+ * read; call at least 25 Hz for smooth VU meter display.
+ *
+ * Peak value encoding:
+ *   0           = silence
+ *   0x7FFFFFFF  = 0 dBFS (full scale)
+ *   dBFS = 20 * log10(value / 2147483647.0)
+ *
+ * RMS values are 64-bit accumulators.  Convert to dBFS:
+ *   dBFS = 10 * log10(rms / (2^63))   (approx; hardware dependent)
+ *
+ * output_peaks has 28 entries: channels 0..25 are the normal outputs,
+ * 26..27 are the S/PDIF outputs present on all card variants.
+ */
+struct hdsp_peak_levels {
+	uint32_t input_peaks[26];
+	uint32_t playback_peaks[26];
+	uint32_t output_peaks[28];
+	uint64_t input_rms[26];
+	uint64_t playback_rms[26];
+};
+
 #define HDSP_IOCTL_GET_CONFIG   _IOR('H', 1, struct hdsp_config_info)
 #define HDSP_IOCTL_GET_MIXER    _IOR('H', 2, struct hdsp_mixer_ioctl)
 #define HDSP_IOCTL_SET_ENTRY    _IOW('H', 3, struct hdsp_mixer_entry)
 #define HDSP_IOCTL_SET_MIXER    _IOW('H', 4, struct hdsp_mixer_ioctl)
+#define HDSP_IOCTL_GET_LEVELS   _IOR('H', 5, struct hdsp_peak_levels)
 
 #endif /* _HDSP_IOCTL_H_ */

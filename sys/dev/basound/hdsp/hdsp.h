@@ -44,6 +44,13 @@
 
 #define HDSP_fifoStatus                 400
 
+/* Peak / RMS level meter registers (direct BAR reads, no FIFO) */
+#define HDSP_playbackPeakLevel  4096    /* 26 × uint32 */
+#define HDSP_inputPeakLevel     4224    /* 26 × uint32 */
+#define HDSP_outputPeakLevel    4352    /* 28 × uint32 */
+#define HDSP_playbackRmsLevel   4612    /* 26 × uint64 (lo/hi split) */
+#define HDSP_inputRmsLevel      4868    /* 26 × uint64 (lo/hi split) */
+
 #define HDSP_MATRIX_MIXER_SIZE          2048
 
 #define UNITY_GAIN              32768   /* 0x8000 = 0 dB, maximum HDSP gain */

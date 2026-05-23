@@ -132,6 +132,35 @@ hdsp_cdev_ioctl(struct cdev *dev, u_long cmd, caddr_t data,
 		return (0);
 	}
 
+	/* ---- read hardware peak / RMS level meters -------------------- */
+	case HDSP_IOCTL_GET_LEVELS: {
+		struct hdsp_peak_levels *lev = (struct hdsp_peak_levels *)data;
+		uint32_t lo, hi;
+
+		mtx_lock(&hdsp->lock);
+		for (i = 0; i < 26; ++i) {
+			lev->playback_peaks[i] =
+			    hdsp_read(hdsp, HDSP_playbackPeakLevel + i * 4);
+			lev->input_peaks[i] =
+			    hdsp_read(hdsp, HDSP_inputPeakLevel + i * 4);
+		}
+		for (i = 0; i < 28; ++i)
+			lev->output_peaks[i] =
+			    hdsp_read(hdsp, HDSP_outputPeakLevel + i * 4);
+		for (i = 0; i < 26; ++i) {
+			/* 64-bit RMS split as two consecutive 32-bit BAR reads */
+			lo = hdsp_read(hdsp, HDSP_playbackRmsLevel + i * 8);
+			hi = hdsp_read(hdsp, HDSP_playbackRmsLevel + i * 8 + 4);
+			lev->playback_rms[i] = ((uint64_t)hi << 32) | lo;
+
+			lo = hdsp_read(hdsp, HDSP_inputRmsLevel + i * 8);
+			hi = hdsp_read(hdsp, HDSP_inputRmsLevel + i * 8 + 4);
+			lev->input_rms[i] = ((uint64_t)hi << 32) | lo;
+		}
+		mtx_unlock(&hdsp->lock);
+		return (0);
+	}
+
 	default:
 		return (ENOTTY);
 	}
