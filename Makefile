@@ -16,6 +16,7 @@ SRCS=	sys/dev/basound/basound.c \
 	sys/dev/basound/hdsp/hdsp_main.c \
 	sys/dev/basound/hdsp/hdsp_mixer.c \
 	sys/dev/basound/hdsp/hdsp_midi.c \
+	sys/dev/basound/hdsp/hdsp_cdev.c \
 	sys/dev/basound/dice/dice_bsd.c \
 	sys/dev/basound/line6/line6_bsd.c \
 	sys/dev/basound/maudio/maudio_midisport.c \

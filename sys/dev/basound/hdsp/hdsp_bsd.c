@@ -139,6 +139,11 @@ hdsp_bsd_attach(device_t dev)
 	/* 4. Register the card */
 	snd_card_register(card);
 
+	/* 5. Expose /dev/hdspN for the native mixer tool */
+	if (hdsp_cdev_create(&sc->chip, device_get_unit(dev)) != 0)
+		device_printf(dev, "Warning: failed to create /dev/hdsp%d\n",
+		    device_get_unit(dev));
+
 	device_printf(dev, "HDSP attached (%s)\n", sc->chip.card_name);
 
 	return (0);
@@ -148,6 +153,8 @@ static int
 hdsp_bsd_detach(device_t dev)
 {
 	struct hdsp_bsd_softc *sc = device_get_softc(dev);
+
+	hdsp_cdev_destroy(&sc->chip);
 
 	if (sc->chip.card) {
 		snd_card_free(sc->chip.card);

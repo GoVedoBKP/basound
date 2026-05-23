@@ -5,6 +5,7 @@
 #include <sys/param.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/conf.h>
 #include <linux/workqueue.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -105,6 +106,7 @@ struct hdsp {
 	struct snd_card      *card;
 	struct snd_pcm       *pcm;
 	struct pci_dev       *pci;
+	struct cdev          *cdev;          /* /dev/hdspN mixer interface */
 	
 	unsigned short        mixer_matrix[HDSP_MATRIX_MIXER_SIZE];
 	
@@ -206,6 +208,10 @@ int hdsp_read_gain(struct hdsp *hdsp, int addr);
 int hdsp_write_gain(struct hdsp *hdsp, unsigned int addr, unsigned short data);
 void snd_hdsp_create_mixer(struct snd_card *card, struct hdsp *hdsp);
 void snd_hdsp_midi_work(struct work_struct *work);
+
+/* Character device for the native FreeBSD mixer tool */
+int  hdsp_cdev_create(struct hdsp *hdsp, int unit);
+void hdsp_cdev_destroy(struct hdsp *hdsp);
 
 /* PCM operations table — registered via snd_pcm_set_ops() in snd_hdsp_create() */
 extern const struct snd_pcm_ops hdsp_pcm_ops;
