@@ -45,6 +45,9 @@
 
 #define HDSP_MATRIX_MIXER_SIZE          2048
 
+#define UNITY_GAIN              32768   /* 0x8000 = 0 dB, maximum HDSP gain */
+#define MINUS_INFINITY_GAIN     0       /* 0x0000 = silence */
+
 enum HDSP_IO_Type {
 	Digiface,
 	Multiface,
@@ -165,6 +168,32 @@ struct hdsp {
 static inline void *snd_kcontrol_chip(struct snd_kcontrol *kcontrol)
 {
 	return kcontrol->private_data;
+}
+
+/*
+ * Matrix mixer address encoding — matches Linux hdsp.c.
+ * firmware_rev == 0xa is a very old card; all modern cards use the else branch.
+ *
+ * Playback channel `in' routed to output `out':
+ *   addr = (52 * out) + (26 + in)   [firmware_rev != 0xa]
+ *
+ * Capture (input) channel `in' monitored on output `out':
+ *   addr = (52 * out) + in           [firmware_rev != 0xa]
+ */
+static inline int hdsp_playback_to_output_key(struct hdsp *hdsp, int in, int out)
+{
+	if (hdsp->firmware_rev == 0xa)
+		return (64 * out) + (32 + in);
+	else
+		return (52 * out) + (26 + in);
+}
+
+static inline int hdsp_input_to_output_key(struct hdsp *hdsp, int in, int out)
+{
+	if (hdsp->firmware_rev == 0xa)
+		return (64 * out) + in;
+	else
+		return (52 * out) + in;
 }
 
 /* Internal functions to be ported */

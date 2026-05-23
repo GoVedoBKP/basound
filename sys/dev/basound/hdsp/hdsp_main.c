@@ -136,16 +136,19 @@ snd_hdsp_create(struct snd_card *card, struct hdsp *hdsp)
 		hdsp->card_name = "RME Digiface";
 		hdsp->ss_in_channels = 26;
 		hdsp->ss_out_channels = 26;
+		hdsp->max_channels = 26;
 		break;
 	case Multiface:
 		hdsp->card_name = "RME Multiface";
 		hdsp->ss_in_channels = 18;
 		hdsp->ss_out_channels = 18;
+		hdsp->max_channels = 18;
 		break;
 	case H9652:
 		hdsp->card_name = "RME Hammerfall DSP 9652";
 		hdsp->ss_in_channels = 26;
 		hdsp->ss_out_channels = 26;
+		hdsp->max_channels = 26;
 		break;
 	default:
 		hdsp->card_name = "RME HDSP Unknown";
@@ -232,8 +235,6 @@ snd_hdsp_interrupt(void *arg)
 		schedule_work(&hdsp->midi_work);
 }
 
-#define MINUS_INFINITY_GAIN 0
-
 int
 hdsp_read_gain(struct hdsp *hdsp, int addr)
 {
@@ -242,11 +243,30 @@ hdsp_read_gain(struct hdsp *hdsp, int addr)
 	return hdsp->mixer_matrix[addr];
 }
 
+/*
+ * Write a gain value into the HDSP's internal matrix mixer RAM.
+ *
+ * For Digiface / Multiface the hardware matrix mixer is accessed through
+ * the same FIFO used for firmware upload.  Each write packs the 11-bit
+ * matrix address into the upper 16 bits and the 16-bit gain value into
+ * the lower 16 bits of the 32-bit FIFO word.
+ *
+ * UNITY_GAIN  = 0x8000 (32768) — 0 dB
+ * MINUS_INFINITY_GAIN = 0x0000 — silence
+ *
+ * H9652 / H9632 use a different (memory-mapped) mechanism and are not
+ * handled here; their firmware is in ROM and no upload is needed.
+ */
 int
 hdsp_write_gain(struct hdsp *hdsp, unsigned int addr, unsigned short data)
 {
 	if (addr >= HDSP_MATRIX_MIXER_SIZE)
 		return -1;
+
+	if (hdsp_fifo_wait(hdsp, 127, HDSP_LONG_WAIT))
+		return -1;
+
+	hdsp_write(hdsp, HDSP_fifoData, (addr << 16) | data);
 	hdsp->mixer_matrix[addr] = data;
 	return 0;
 }
@@ -279,6 +299,63 @@ hdsp_set_rate(struct hdsp *hdsp, int rate, int called_internally)
 	hdsp_set_dds_value(hdsp, rate);
 	hdsp->system_sample_rate = rate;
 	
+	return 0;
+}
+
+int
+snd_hdsp_enable_io(struct hdsp *hdsp)
+{
+	int i;
+
+	if (hdsp_fifo_wait(hdsp, 0, 100)) {
+		dev_err(hdsp->card->dev, "enable_io: FIFO not empty\n");
+		return -EIO;
+	}
+
+	for (i = 0; i < hdsp->max_channels; ++i) {
+		hdsp_write(hdsp, HDSP_inputEnable  + (4 * i), 1);
+		hdsp_write(hdsp, HDSP_outputEnable + (4 * i), 1);
+	}
+	return 0;
+}
+
+/*
+ * Initialize the hardware matrix mixer to a usable default state:
+ *
+ *  1. Silence all 2048 entries (MINUS_INFINITY_GAIN = 0).
+ *  2. Route each playback channel N directly to output N at unity gain.
+ *
+ * Without step 2 the DMA playback buffers are never connected to the
+ * physical outputs and no sound is produced, even if the DMA engine is
+ * running correctly.
+ */
+static int
+hdsp_init_mixer(struct hdsp *hdsp)
+{
+	int i, addr;
+
+	/* Silence the entire matrix */
+	for (i = 0; i < HDSP_MATRIX_MIXER_SIZE; ++i) {
+		if (hdsp_write_gain(hdsp, i, MINUS_INFINITY_GAIN) < 0) {
+			dev_err(hdsp->card->dev,
+			    "mixer init: FIFO timeout at entry %d\n", i);
+			return -EIO;
+		}
+	}
+
+	/* Direct playback N → output N at 0 dB */
+	for (i = 0; i < hdsp->max_channels; ++i) {
+		addr = hdsp_playback_to_output_key(hdsp, i, i);
+		if (hdsp_write_gain(hdsp, addr, UNITY_GAIN) < 0) {
+			dev_err(hdsp->card->dev,
+			    "mixer init: unity gain write failed ch %d\n", i);
+			return -EIO;
+		}
+	}
+
+	dev_info(hdsp->card->dev,
+	    "mixer initialized: %d channels routed to outputs\n",
+	    hdsp->max_channels);
 	return 0;
 }
 
@@ -362,6 +439,20 @@ snd_hdsp_upload_firmware(struct hdsp *hdsp)
 	                         HDSP_LineOut;
 	hdsp_write(hdsp, HDSP_controlRegister, hdsp->control_register);
 	hdsp_set_rate(hdsp, 48000, 1);
+
+	/* Enable input and output channels so the DACs/ADCs are active. */
+	if (snd_hdsp_enable_io(hdsp) < 0) {
+		dev_err(hdsp->card->dev, "failed to enable I/O channels\n");
+		return -EIO;
+	}
+
+	/* Program the hardware matrix mixer: silence everything, then route
+	 * playback channel N → output N at unity gain so that PCM playback
+	 * is immediately audible without requiring hdspmixer configuration. */
+	if (hdsp_init_mixer(hdsp) < 0) {
+		dev_err(hdsp->card->dev, "failed to initialize mixer\n");
+		return -EIO;
+	}
 
 	return 0;
 }
