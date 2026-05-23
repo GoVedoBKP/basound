@@ -49,63 +49,88 @@ float VuMeter::db_to_frac(float db) const {
 void VuMeter::draw() {
 	const int bx = x(), by = y(), bw = w(), bh = h();
 
-	/* Background */
-	fl_color(FL_BLACK);
-	fl_rectf(bx, by, bw, bh);
-
-	if (bh < 4 || bw < 2)
-		return;
-
 	/* Reserve label area at bottom */
-	const int lh = label() ? 12 : 0;
+	const int lh = label() ? 13 : 0;
 	const int meter_h = bh - lh;
 
-	const float frac  = db_to_frac(level_db_);
-	const int   fill  = (int)(frac * meter_h);
+	if (meter_h < 4 || bw < 4) {
+		fl_color(FL_BLACK);
+		fl_rectf(bx, by, bw, bh);
+		return;
+	}
 
-	/* Segment thresholds (fractions of full scale) */
-	const float kGreenTop  = 0.67f; /* -18 dBFS */
-	const float kYellowTop = 0.90f; /* -6 dBFS */
+	/* Bar interior: slightly narrowed from border */
+	const int bar_x  = bx + 2;
+	const int bar_w  = bw - 4;
 
-	/* Draw bar from the bottom up */
+	/* ---- background ---- */
+	fl_color(fl_rgb_color(12, 14, 18));
+	fl_rectf(bx, by, bw, meter_h);
+
+	/* ---- colored fill bar (bottom up) ---- */
+	const float frac = db_to_frac(level_db_);
+	const int   fill = (int)(frac * meter_h);
+
+	/* Green / yellow / red thresholds */
+	const float kGreenTop  = 0.67f; /* ≈ -18 dBFS */
+	const float kYellowTop = 0.90f; /* ≈  -6 dBFS */
+
 	for (int row = 0; row < fill; ++row) {
 		float pos = (float)row / meter_h;
 		Fl_Color col;
 		if (pos < kGreenTop)
-			col = fl_rgb_color(0, 210, 0);
+			col = fl_rgb_color(0, 200, 0);
 		else if (pos < kYellowTop)
-			col = fl_rgb_color(230, 200, 0);
+			col = fl_rgb_color(220, 190, 0);
 		else
-			col = fl_rgb_color(230, 30, 30);
-
+			col = fl_rgb_color(220, 30, 30);
 		fl_color(col);
 		int bar_y = by + meter_h - 1 - row;
-		fl_line(bx + 1, bar_y, bx + bw - 2, bar_y);
+		fl_line(bar_x, bar_y, bar_x + bar_w - 1, bar_y);
 	}
 
-	/* Segment gap lines (every 3 dB) */
-	fl_color(FL_BLACK);
-	for (float db = -60.0f; db <= 0.0f; db += 3.0f) {
-		float f = db_to_frac(db);
-		int gy = by + meter_h - (int)(f * meter_h);
-		if (gy >= by && gy < by + meter_h)
-			fl_line(bx, gy, bx + bw - 1, gy);
+	/* ---- scale tick marks — always drawn so the meter is visible ----
+	 * Major marks (0, -6, -12, -18, -24, -36, -60 dBFS): bright
+	 * Minor marks (every 3 dB): dim                                   */
+	static const float kMajor[] = {0.f,-6.f,-12.f,-18.f,-24.f,-36.f,-60.f};
+	for (float db = kFloor; db <= 0.0f; db += 3.0f) {
+		float f   = db_to_frac(db);
+		int   ty  = by + meter_h - 1 - (int)(f * (meter_h - 1));
+
+		bool major = false;
+		for (float m : kMajor) { if (fabsf(db - m) < 0.5f) { major = true; break; } }
+
+		if (major)
+			fl_color(fl_rgb_color(90, 90, 90));
+		else
+			fl_color(fl_rgb_color(30, 30, 30));
+		fl_line(bar_x, ty, bar_x + bar_w - 1, ty);
 	}
 
-	/* Peak hold line */
+	/* 0 dBFS top marker: slightly red tint */
+	{
+		int top_y = by + 1;
+		fl_color(fl_rgb_color(120, 40, 40));
+		fl_line(bar_x, top_y, bar_x + bar_w - 1, top_y);
+	}
+
+	/* ---- peak hold line ---- */
 	if (peak_hold_db_ > kFloor) {
-		float pf   = db_to_frac(peak_hold_db_);
-		int   py   = by + meter_h - (int)(pf * meter_h) - 1;
+		float pf = db_to_frac(peak_hold_db_);
+		int   py = by + meter_h - 1 - (int)(pf * (meter_h - 1));
 		fl_color(FL_WHITE);
-		fl_line(bx + 1, py, bx + bw - 2, py);
+		fl_line(bar_x, py, bar_x + bar_w - 1, py);
+		fl_line(bar_x, py - 1, bar_x + bar_w - 1, py - 1);
 	}
 
-	/* Border */
-	fl_color(fl_rgb_color(60, 60, 60));
+	/* ---- border ---- */
+	fl_color(fl_rgb_color(100, 100, 110));
 	fl_rect(bx, by, bw, meter_h);
 
-	/* Label */
+	/* ---- channel label ---- */
 	if (lh > 0) {
+		fl_color(fl_rgb_color(50, 50, 50));
+		fl_rectf(bx, by + meter_h, bw, lh);
 		fl_color(FL_WHITE);
 		fl_font(FL_HELVETICA, 9);
 		fl_draw(label(), bx, by + meter_h, bw, lh,

@@ -196,6 +196,7 @@ void MixerWindow::connect(const char *path) {
 	}
 	connected_ = true;
 	build_ui();
+	redraw();   /* paint new widgets immediately */
 
 	const auto &cfg = dev_.config();
 	char buf[128];
@@ -294,7 +295,6 @@ void MixerWindow::timer_cb(void *userdata) {
 
 void MixerWindow::update_meters() {
 	if (!connected_) return;
-	if (tabs_->value() != tab_meters_) return; /* only update when visible */
 
 	struct hdsp_peak_levels lev;
 	if (!dev_.get_levels(lev)) return;
@@ -314,7 +314,9 @@ void MixerWindow::update_meters() {
 		vu_out_[i]->tick();
 	}
 
-	meter_scroll_->redraw();
+	/* Only repaint the meters scroll if it is the active tab */
+	if (tabs_->value() == tab_meters_)
+		meter_scroll_->redraw();
 }
 
 /* ------------------------------------------------------------------ */
