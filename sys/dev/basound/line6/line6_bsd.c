@@ -436,9 +436,17 @@ line6_bsd_attach(device_t dev)
 		return ENXIO;
 
 	sc = device_get_softc(dev);
+	if (sc == NULL)
+		return ENXIO;
+
 	sc->dev = dev;
 	sc->usbdev = uaa->device;
 	sc->idesc = usbd_get_interface_descriptor(uaa->iface);
+	if (sc->idesc == NULL) {
+		device_printf(dev, "Failed to get interface descriptor\n");
+		return ENXIO;
+	}
+
 	sc->capabilities = info->capabilities;
 	sc->device_name = info->name;
 	sc->alsa_dev.bsddev = dev;
@@ -448,7 +456,7 @@ line6_bsd_attach(device_t dev)
 
 	/* Create ALSA sound card */
 	err = snd_card_new(&sc->alsa_dev, 0, info->card_id, NULL, 0, &card);
-	if (err < 0) {
+	if (err < 0 || card == NULL) {
 		device_printf(dev, "Failed to create sound card: %d\n", err);
 		return ENXIO;
 	}
@@ -466,7 +474,7 @@ line6_bsd_attach(device_t dev)
 
 		err = snd_pcm_new(card, info->card_id, 0, 
 				  playback_count, capture_count, &pcm);
-		if (err < 0) {
+		if (err < 0 || pcm == NULL) {
 			device_printf(dev, "Failed to create PCM device: %d\n", err);
 			snd_card_free(card);
 			return ENXIO;
