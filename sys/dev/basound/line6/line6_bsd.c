@@ -30,11 +30,37 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/rawmidi.h>
-#include "../audio_stream.h"
+#include <alsa_pcm_bsd.h>
 
 /* Line6 USB driver - bridges FreeBSD usb_device to ALSA Line6 driver */
 
 MALLOC_DECLARE(M_ALSA);
+
+/*
+ * USB isochronous transport parameters.
+ * Full-speed USB (12 Mbps) has 1 ms frames → 1000 fps.
+ * Use 8 frames per transfer → 8 ms batches, low enough for JACK.
+ */
+#define LINE6_NFRAMES		8	/* ISO frames per USB transfer */
+#define LINE6_NCHANBUFS		2	/* double-buffered outstanding transfers */
+
+/*
+ * Per-direction audio stream state.  One instance lives in the softc for
+ * playback and one for capture.  Protected by sc->sc_lock (the USB mutex).
+ */
+struct line6_audio_stream {
+	struct usb_xfer	*xfer[LINE6_NCHANBUFS + 1]; /* +1 for sync endpoint */
+	struct pcm_channel *pcm_ch;	/* FreeBSD PCM channel (for chn_intr) */
+	uint8_t		*start;		/* DMA ring buffer start */
+	uint8_t		*end;		/* DMA ring buffer end */
+	uint8_t		*cur;		/* Current read/write position */
+	uint32_t	 bytes_per_frame[2]; /* [0]=base bytes, [1]=base+sample_sz */
+	uint32_t	 intr_frames;	/* USB frames per transfer */
+	uint32_t	 frames_per_second; /* 1000 for FS, 8000 for HS */
+	uint32_t	 sample_rem;	/* sample_rate % frames_per_second */
+	uint32_t	 sample_curr;	/* jitter correction accumulator */
+	int		 running;	/* 1 while transfers are active */
+};
 
 /* Line6 vendor ID */
 #define LINE6_VENDOR_ID		0x0e41
@@ -172,18 +198,317 @@ static const struct line6_device_info line6_devices[] = {
 };
 
 struct line6_bsd_softc {
-	device_t dev;
-	struct device alsa_dev;	/* wrapper so card->dev stays valid after attach */
+	device_t	 dev;
+	struct device	 alsa_dev;	/* wrapper so card->dev stays valid */
 	struct usb_device *usbdev;
 	usb_interface_descriptor_t *idesc;
-	void *alsa_line6;
-	unsigned int capabilities;
-	const char *device_name;
+	void		*alsa_line6;
+	unsigned int	 capabilities;
+	const char	*device_name;
+
+	/* Audio transport */
+	struct mtx	 sc_lock;	/* serialises USB state; USB callback mutex */
+	struct line6_audio_stream play;
+	struct line6_audio_stream rec;
+	uint8_t		 play_iface_index; /* USB interface for playback OUT */
+	uint8_t		 rec_iface_index;  /* USB interface for capture IN */
+	int		 xfer_setup;	/* 1 if usbd_transfer_setup succeeded */
 };
 
 MALLOC_DEFINE(M_LINE6_BSD, "line6_bsd", "Line6 BSD softc");
 
-/* Find device info by product ID */
+/* Forward declarations for USB isochronous callbacks */
+static usb_callback_t line6_play_callback;
+static usb_callback_t line6_rec_callback;
+static usb_callback_t line6_sync_callback;
+
+/* USB isochronous config for playback (HOST → DEVICE, OUT) */
+static const struct usb_config line6_play_cfg[LINE6_NCHANBUFS + 1] = {
+	[0] = {
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_OUT,
+		.bufsize = 0,		/* wMaxPacketSize × frames */
+		.frames = LINE6_NFRAMES,
+		.flags = {.short_xfer_ok = 1},
+		.callback = &line6_play_callback,
+	},
+	[1] = {
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_OUT,
+		.bufsize = 0,
+		.frames = LINE6_NFRAMES,
+		.flags = {.short_xfer_ok = 1},
+		.callback = &line6_play_callback,
+	},
+	[2] = {	/* optional sync feedback endpoint (IN) */
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_IN,
+		.bufsize = 0,
+		.frames = 1,
+		.flags = {.no_pipe_ok = 1, .short_xfer_ok = 1},
+		.callback = &line6_sync_callback,
+	},
+};
+
+/* USB isochronous config for capture (DEVICE → HOST, IN) */
+static const struct usb_config line6_rec_cfg[LINE6_NCHANBUFS + 1] = {
+	[0] = {
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_IN,
+		.bufsize = 0,
+		.frames = LINE6_NFRAMES,
+		.flags = {.short_xfer_ok = 1},
+		.callback = &line6_rec_callback,
+	},
+	[1] = {
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_IN,
+		.bufsize = 0,
+		.frames = LINE6_NFRAMES,
+		.flags = {.short_xfer_ok = 1},
+		.callback = &line6_rec_callback,
+	},
+	[2] = {	/* optional sync feedback endpoint (OUT) */
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_OUT,
+		.bufsize = 0,
+		.frames = 1,
+		.flags = {.no_pipe_ok = 1, .short_xfer_ok = 1},
+		.callback = &line6_sync_callback,
+	},
+};
+
+/*
+ * Walk the USB configuration descriptor to discover the interface indices of
+ * the audio streaming interfaces.  UAC 1.0 layout: iface 0 = AudioControl,
+ * iface 1 = AudioStreaming OUT (playback), iface 2 = AudioStreaming IN.
+ * Falls back to hardcoded defaults if descriptors are non-standard.
+ */
+static int
+line6_find_audio_ifaces(struct usb_device *udev,
+    uint8_t *play_iface, uint8_t *rec_iface)
+{
+	struct usb_config_descriptor *cd;
+	struct usb_descriptor *desc;
+	struct usb_interface_descriptor *id;
+	struct usb_endpoint_descriptor *ed;
+	uint8_t cur_iface;
+	int in_audio_stream;
+	int found_play, found_rec;
+
+	cd = usbd_get_config_descriptor(udev);
+	if (cd == NULL)
+		return ENXIO;
+
+	desc = NULL;
+	cur_iface = 0;
+	in_audio_stream = 0;
+	found_play = 0;
+	found_rec = 0;
+
+	while ((desc = usb_desc_foreach(cd, desc)) != NULL) {
+		if (desc->bDescriptorType == UDESC_INTERFACE) {
+			id = (struct usb_interface_descriptor *)desc;
+			cur_iface = id->bInterfaceNumber;
+			/* Audio Streaming alternate with at least one endpoint */
+			in_audio_stream = (id->bInterfaceClass == UICLASS_AUDIO &&
+			    id->bInterfaceSubClass == UISUBCLASS_AUDIOSTREAM &&
+			    id->bNumEndpoints > 0) ? 1 : 0;
+		} else if (desc->bDescriptorType == UDESC_ENDPOINT &&
+		    in_audio_stream) {
+			ed = (struct usb_endpoint_descriptor *)desc;
+			if (UE_GET_XFERTYPE(ed->bmAttributes) == UE_ISOCHRONOUS) {
+				if (UE_GET_DIR(ed->bEndpointAddress) == UE_DIR_OUT) {
+					*play_iface = cur_iface;
+					found_play = 1;
+				} else {
+					*rec_iface = cur_iface;
+					found_rec = 1;
+				}
+				in_audio_stream = 0; /* one endpoint per iface */
+			}
+		}
+	}
+
+	/* Need at least one direction to be useful */
+	return (found_play || found_rec) ? 0 : ENXIO;
+}
+
+/* Sync endpoint callback: no-op (informational only) */
+static void
+line6_sync_callback(struct usb_xfer *xfer, usb_error_t error __unused)
+{
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_SETUP:
+		usbd_xfer_set_frames(xfer, 1);
+		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_framelen(xfer));
+		usbd_transfer_submit(xfer);
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+ * USB isochronous playback callback.
+ * Called with sc->sc_lock held (it is the USB transfer mutex).
+ *
+ * On USB_ST_SETUP (first invocation) and USB_ST_TRANSFERRED (previous packet
+ * delivered): fill the next LINE6_NFRAMES worth of packets from the DMA ring
+ * buffer and submit.  After data is consumed, notify the PCM layer so it can
+ * refill the ring buffer — but we must drop sc_lock first to avoid a lock
+ * order reversal with the PCM channel lock.
+ */
+static void
+line6_play_callback(struct usb_xfer *xfer, usb_error_t error)
+{
+	struct line6_audio_stream *st = usbd_xfer_softc(xfer);
+	struct line6_bsd_softc *sc =
+	    __containerof(st, struct line6_bsd_softc, play);
+	struct usb_page_cache *pc;
+	uint32_t total, n, offset, frame_len;
+	int actlen, sumlen;
+
+	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_SETUP:
+	case USB_ST_TRANSFERRED:
+		if (!st->running || st->start == NULL || st->start == st->end)
+			break;
+
+		/*
+		 * After the previous transfer completed, notify the PCM layer
+		 * that the ring buffer was consumed.  Drop sc_lock first:
+		 * chn_intr acquires the PCM channel lock, and the channel lock
+		 * → sc_lock order (from trigger) means we must not hold sc_lock
+		 * when taking the channel lock.
+		 */
+		if (USB_GET_STATE(xfer) == USB_ST_TRANSFERRED &&
+		    st->pcm_ch != NULL) {
+			mtx_unlock(&sc->sc_lock);
+			chn_intr(st->pcm_ch);
+			mtx_lock(&sc->sc_lock);
+			if (!st->running)
+				break;
+		}
+
+		/* Compute per-frame lengths with rate jitter correction */
+		usbd_xfer_set_frames(xfer, st->intr_frames);
+		total = 0;
+		for (n = 0; n < st->intr_frames; n++) {
+			st->sample_curr += st->sample_rem;
+			if (st->sample_curr >= st->frames_per_second) {
+				st->sample_curr -= st->frames_per_second;
+				frame_len = st->bytes_per_frame[1];
+			} else {
+				frame_len = st->bytes_per_frame[0];
+			}
+			usbd_xfer_set_frame_len(xfer, n, frame_len);
+			total += frame_len;
+		}
+
+		/* Copy from DMA ring buffer into USB isochronous packet */
+		offset = 0;
+		pc = usbd_xfer_get_frame(xfer, 0);
+		while (total > 0) {
+			n = (uint32_t)(st->end - st->cur);
+			if (n > total)
+				n = total;
+			usbd_copy_in(pc, offset, st->cur, n);
+			total -= n;
+			st->cur += n;
+			offset += n;
+			if (st->cur >= st->end)
+				st->cur = st->start;
+		}
+		usbd_transfer_submit(xfer);
+		break;
+
+	default:	/* Error */
+		if (error != USB_ERR_CANCELLED && st->running) {
+			/* Transient error: send one silent frame and recover */
+			usbd_xfer_set_frames(xfer, 1);
+			usbd_xfer_set_frame_len(xfer, 0, st->bytes_per_frame[0]);
+			usbd_transfer_submit(xfer);
+		}
+		break;
+	}
+}
+
+/*
+ * USB isochronous capture callback.
+ * Called with sc->sc_lock held (it is the USB transfer mutex).
+ *
+ * On USB_ST_TRANSFERRED: copy received ISO packets into the DMA ring buffer,
+ * then notify the PCM layer (drop sc_lock first for the same reason as play).
+ * On USB_ST_SETUP: arm the receive transfer.
+ */
+static void
+line6_rec_callback(struct usb_xfer *xfer, usb_error_t error)
+{
+	struct line6_audio_stream *st = usbd_xfer_softc(xfer);
+	struct line6_bsd_softc *sc =
+	    __containerof(st, struct line6_bsd_softc, rec);
+	struct usb_page_cache *pc;
+	uint32_t offset, n, len;
+	int actlen, nframes, i;
+
+	usbd_xfer_status(xfer, &actlen, NULL, NULL, &nframes);
+
+	switch (USB_GET_STATE(xfer)) {
+	case USB_ST_TRANSFERRED:
+		if (st->start == NULL || st->start == st->end)
+			goto tr_setup;
+
+		pc = usbd_xfer_get_frame(xfer, 0);
+		offset = 0;
+		for (i = 0; i < nframes; i++) {
+			len = usbd_xfer_frame_len(xfer, i);
+			while (len > 0) {
+				n = (uint32_t)(st->end - st->cur);
+				if (n > len)
+					n = len;
+				usbd_copy_out(pc, offset, st->cur, n);
+				len -= n;
+				st->cur += n;
+				offset += n;
+				if (st->cur >= st->end)
+					st->cur = st->start;
+			}
+		}
+
+		if (st->pcm_ch != NULL) {
+			mtx_unlock(&sc->sc_lock);
+			chn_intr(st->pcm_ch);
+			mtx_lock(&sc->sc_lock);
+		}
+		/* FALLTHROUGH to re-arm */
+	case USB_ST_SETUP:
+tr_setup:
+		if (!st->running)
+			break;
+		usbd_xfer_set_frames(xfer, st->intr_frames);
+		for (i = 0; i < (int)st->intr_frames; i++)
+			usbd_xfer_set_frame_len(xfer, i, st->bytes_per_frame[1]);
+		usbd_transfer_submit(xfer);
+		break;
+
+	default:	/* Error */
+		if (error != USB_ERR_CANCELLED && st->running) {
+			usbd_xfer_set_frames(xfer, 1);
+			usbd_xfer_set_frame_len(xfer, 0, st->bytes_per_frame[1]);
+			usbd_transfer_submit(xfer);
+		}
+		break;
+	}
+}
 static const struct line6_device_info *
 line6_bsd_find_device(uint16_t product_id)
 {
@@ -210,20 +535,17 @@ line6_pcm_open(struct snd_pcm_substream *substream)
 	runtime->hw.info = SNDRV_PCM_INFO_MMAP |
 			   SNDRV_PCM_INFO_MMAP_VALID |
 			   SNDRV_PCM_INFO_INTERLEAVED;
-	/* Line6 devices typically support 16-bit and 24-bit formats */
 	runtime->hw.formats = SNDRV_PCM_FMTBIT_S16_LE |
 			      SNDRV_PCM_FMTBIT_S24_3LE;
-	/* Line6 devices support 44.1kHz and 48kHz primarily */
 	runtime->hw.rates = SNDRV_PCM_RATE_44100 |
 			    SNDRV_PCM_RATE_48000;
 	runtime->hw.rate_min = 44100;
 	runtime->hw.rate_max = 48000;
-	/* Most Line6 devices have 2 channels (stereo) */
 	runtime->hw.channels_min = 1;
 	runtime->hw.channels_max = 2;
-	runtime->hw.buffer_bytes_max = 1 << 20; /* 1MB */
+	runtime->hw.buffer_bytes_max = 1 << 20;
 	runtime->hw.period_bytes_min = 64;
-	runtime->hw.period_bytes_max = 1 << 16; /* 64KB */
+	runtime->hw.period_bytes_max = 1 << 16;
 	runtime->hw.periods_min = 2;
 	runtime->hw.periods_max = 128;
 	
@@ -273,57 +595,95 @@ line6_pcm_prepare(struct snd_pcm_substream *substream)
 static int
 line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
-	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct audio_stream *stream;
-	
-	if (runtime == NULL)
+	struct basound_chan *ch;
+	struct snd_pcm_runtime *runtime;
+	struct line6_bsd_softc *sc;
+	struct line6_audio_stream *st;
+	uint32_t channels, bps, sample_size;
+
+	if (substream == NULL || substream->runtime == NULL ||
+	    substream->pcm == NULL || substream->pcm->card == NULL ||
+	    substream->pcm->card->dev == NULL)
 		return -EINVAL;
-	
-	/* Get audio_stream from private data if available */
-	stream = (struct audio_stream *)runtime->private_data;
-	
+
+	ch = (struct basound_chan *)substream->private_data;
+	if (ch == NULL)
+		return -EINVAL;
+
+	runtime = substream->runtime;
+
+	/* Recover softc via the alsa_dev back-pointer embedded in softc */
+	sc = __containerof(substream->pcm->card->dev,
+	    struct line6_bsd_softc, alsa_dev);
+
+	st = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+	    &sc->play : &sc->rec;
+
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
-		/* Start USB audio streaming with framework integration */
-		if (stream) {
-			audio_stream_start(stream);
-			/* In real implementation:
-			 * - Allocate USB isochronous or bulk URBs
-			 * - Set up transfer buffers pointing to DMA area
-			 * - Submit URBs to USB device for periodic transfers
-			 * - Framework position tracking handles updates
-			 */
+		if (runtime->dma_area == NULL || runtime->dma_bytes == 0)
+			return -EINVAL;
+
+		/* Derive USB frame size from the negotiated format + rate */
+		channels = AFMT_CHANNEL(ch->format);
+		if (ch->format & AFMT_S32_LE)
+			bps = 4;
+		else if (ch->format & AFMT_S24_LE)
+			bps = 3;
+		else
+			bps = 2;	/* S16_LE default */
+		sample_size = channels * bps;
+
+		mtx_lock(&sc->sc_lock);
+		st->frames_per_second = usbd_get_isoc_fps(sc->usbdev);
+		if (st->frames_per_second == 0)
+			st->frames_per_second = 1000;	/* full-speed fallback */
+		st->intr_frames = LINE6_NFRAMES;
+		st->bytes_per_frame[0] =
+		    (ch->speed / st->frames_per_second) * sample_size;
+		st->sample_rem = ch->speed % st->frames_per_second;
+		st->bytes_per_frame[1] = st->bytes_per_frame[0] + sample_size;
+		st->sample_curr = 0;
+
+		st->start = (uint8_t *)runtime->dma_area;
+		st->end   = (uint8_t *)runtime->dma_area + runtime->dma_bytes;
+		st->cur   = (uint8_t *)runtime->dma_area;
+		st->pcm_ch = ch->channel;
+		st->running = 1;
+
+		if (sc->xfer_setup) {
+			usbd_transfer_start(st->xfer[0]);
+			usbd_transfer_start(st->xfer[1]);
 		}
+		mtx_unlock(&sc->sc_lock);
+
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
 		runtime->dma_position = 0;
 		return 0;
-		
+
 	case SNDRV_PCM_TRIGGER_STOP:
-		/* Stop USB audio streaming */
-		if (stream) {
-			audio_stream_stop(stream);
-			/* In real implementation:
-			 * - Unlink all active URBs
-			 * - Stop transfers from device
-			 * - Free allocated URB buffers
-			 * - Framework handles state cleanup
-			 */
+	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		mtx_lock(&sc->sc_lock);
+		st->running = 0;
+		if (sc->xfer_setup) {
+			usbd_transfer_stop(st->xfer[0]);
+			usbd_transfer_stop(st->xfer[1]);
 		}
+		mtx_unlock(&sc->sc_lock);
 		runtime->state = SNDRV_PCM_STATE_STOPPED;
 		return 0;
-		
-	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		if (stream)
-			audio_stream_pause(stream);
-		runtime->state = SNDRV_PCM_STATE_PAUSED;
-		return 0;
-		
+
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-		if (stream)
-			audio_stream_resume(stream);
+		mtx_lock(&sc->sc_lock);
+		st->running = 1;
+		if (sc->xfer_setup) {
+			usbd_transfer_start(st->xfer[0]);
+			usbd_transfer_start(st->xfer[1]);
+		}
+		mtx_unlock(&sc->sc_lock);
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
 		return 0;
-		
+
 	default:
 		return -EINVAL;
 	}
@@ -332,33 +692,24 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 static unsigned long
 line6_pcm_pointer(struct snd_pcm_substream *substream)
 {
-	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct audio_stream *stream;
-	unsigned long position = 0;
-	
-	if (runtime == NULL || runtime->dma_area == NULL)
+	struct line6_bsd_softc *sc;
+	struct line6_audio_stream *st;
+
+	if (substream == NULL || substream->pcm == NULL ||
+	    substream->pcm->card == NULL ||
+	    substream->pcm->card->dev == NULL)
 		return 0;
-	
-	/* Get audio_stream from private data if available */
-	stream = (struct audio_stream *)runtime->private_data;
-	
-	if (stream) {
-		/* Get position from audio_stream framework */
-		mtx_lock(&stream->lock);
-		position = stream->position % runtime->dma_bytes;
-		mtx_unlock(&stream->lock);
-	} else {
-		/* Fallback to runtime position if framework not available */
-		position = runtime->dma_position % runtime->dma_bytes;
-	}
-	
-	/* In real implementation:
-	 * - Read current frame number from USB device
-	 * - Map to DMA buffer position via framework
-	 * - Call audio_stream_update_position() on URB completion
-	 * - Return wrapped position within buffer
-	 */
-	return position;
+
+	sc = __containerof(substream->pcm->card->dev,
+	    struct line6_bsd_softc, alsa_dev);
+
+	st = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+	    &sc->play : &sc->rec;
+
+	if (st->start == NULL || st->cur == NULL)
+		return 0;
+
+	return (unsigned long)(st->cur - st->start);
 }
 
 static const struct snd_pcm_ops line6_pcm_ops = {
@@ -381,6 +732,11 @@ line6_bsd_probe(device_t dev)
 
 	uaa = device_get_ivars(dev);
 	if (uaa == NULL)
+		return ENXIO;
+
+	/* Only attach to the AudioControl interface (bInterfaceNumber == 0).
+	 * The driver then reaches out to the AudioStreaming interfaces itself. */
+	if (uaa->info.bIfaceNum != 0)
 		return ENXIO;
 
 	/* Check for Line6 vendor ID */
@@ -406,6 +762,7 @@ line6_bsd_attach(device_t dev)
 	const struct line6_device_info *info;
 	struct snd_card *card;
 	struct snd_pcm *pcm;
+	usb_error_t uerr;
 	int err;
 
 	uaa = device_get_ivars(dev);
@@ -433,36 +790,84 @@ line6_bsd_attach(device_t dev)
 	sc->device_name = info->name;
 	sc->alsa_dev.bsddev = dev;
 
-	device_printf(dev, "Probing %s (USB %04x:%04x)\n",
-		      info->name, uaa->info.idVendor, uaa->info.idProduct);
+	mtx_init(&sc->sc_lock, "line6_lock", NULL, MTX_DEF);
+
+	device_printf(dev, "Attaching %s (USB %04x:%04x)\n",
+	    info->name, uaa->info.idVendor, uaa->info.idProduct);
+
+	/* Discover audio streaming interface indices from USB descriptors */
+	if (info->capabilities & (LINE6_CAP_AUDIO_IN | LINE6_CAP_AUDIO_OUT)) {
+		err = line6_find_audio_ifaces(sc->usbdev,
+		    &sc->play_iface_index, &sc->rec_iface_index);
+		if (err != 0) {
+			/* UAC 1.0 fallback: AC=0, AS-play=1, AS-rec=2 */
+			sc->play_iface_index = 1;
+			sc->rec_iface_index  = 2;
+			device_printf(dev, "descriptor scan failed, "
+			    "using default iface indices (play=1 rec=2)\n");
+		} else {
+			device_printf(dev, "found audio ifaces: play=%u rec=%u\n",
+			    sc->play_iface_index, sc->rec_iface_index);
+		}
+
+		/* Set up USB isochronous transfers for playback */
+		if (info->capabilities & LINE6_CAP_AUDIO_OUT) {
+			uerr = usbd_transfer_setup(sc->usbdev,
+			    &sc->play_iface_index,
+			    sc->play.xfer, line6_play_cfg,
+			    LINE6_NCHANBUFS + 1,
+			    &sc->play, &sc->sc_lock);
+			if (uerr != 0)
+				device_printf(dev,
+				    "play transfer setup failed: %s\n",
+				    usbd_errstr(uerr));
+		}
+
+		/* Set up USB isochronous transfers for capture */
+		if (info->capabilities & LINE6_CAP_AUDIO_IN) {
+			uerr = usbd_transfer_setup(sc->usbdev,
+			    &sc->rec_iface_index,
+			    sc->rec.xfer, line6_rec_cfg,
+			    LINE6_NCHANBUFS + 1,
+			    &sc->rec, &sc->sc_lock);
+			if (uerr != 0)
+				device_printf(dev,
+				    "rec transfer setup failed: %s\n",
+				    usbd_errstr(uerr));
+		}
+
+		sc->xfer_setup = 1;
+	}
 
 	/* Create ALSA sound card */
 	err = snd_card_new(&sc->alsa_dev, 0, info->card_id, NULL, 0, &card);
 	if (err < 0 || card == NULL) {
 		device_printf(dev, "Failed to create sound card: %d\n", err);
-		return ENXIO;
+		goto fail;
 	}
 
 	/* Set card properties */
 	snprintf(card->driver, sizeof(card->driver), "line6_bsd");
 	snprintf(card->shortname, sizeof(card->shortname), "%s", info->name);
 	snprintf(card->longname, sizeof(card->longname),
-		 "%s at USB", info->name);
+	    "%s at USB", info->name);
 
 	/* Create PCM device for audio I/O */
 	if (info->capabilities & (LINE6_CAP_AUDIO_IN | LINE6_CAP_AUDIO_OUT)) {
-		int playback_count = (info->capabilities & LINE6_CAP_AUDIO_OUT) ? 1 : 0;
-		int capture_count = (info->capabilities & LINE6_CAP_AUDIO_IN) ? 1 : 0;
+		int playback_count =
+		    (info->capabilities & LINE6_CAP_AUDIO_OUT) ? 1 : 0;
+		int capture_count =
+		    (info->capabilities & LINE6_CAP_AUDIO_IN)  ? 1 : 0;
 
-		err = snd_pcm_new(card, info->card_id, 0, 
-				  playback_count, capture_count, &pcm);
+		err = snd_pcm_new(card, info->card_id, 0,
+		    playback_count, capture_count, &pcm);
 		if (err < 0 || pcm == NULL) {
-			device_printf(dev, "Failed to create PCM device: %d\n", err);
+			device_printf(dev, "Failed to create PCM device: %d\n",
+			    err);
 			snd_card_free(card);
-			return ENXIO;
+			goto fail;
 		}
 
-		/* Set PCM operations */
 		snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &line6_pcm_ops);
 		snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &line6_pcm_ops);
 
@@ -474,10 +879,9 @@ line6_bsd_attach(device_t dev)
 		struct snd_rawmidi *rmidi;
 
 		err = snd_rawmidi_new(card, "Line6 MIDI", 0, 1, 1, &rmidi);
-		if (err < 0) {
-			device_printf(dev, "Failed to create MIDI device: %d\n", err);
-			/* MIDI creation failure is non-fatal */
-		}
+		if (err < 0)
+			device_printf(dev,
+			    "Failed to create MIDI device: %d\n", err);
 	}
 
 	/* Register sound card with FreeBSD */
@@ -485,14 +889,24 @@ line6_bsd_attach(device_t dev)
 	if (err < 0) {
 		device_printf(dev, "Failed to register sound card: %d\n", err);
 		snd_card_free(card);
-		return ENXIO;
+		goto fail;
 	}
 
 	sc->alsa_line6 = card;
 
-	device_printf(dev, "Line6 device attached - %s registered\n", info->name);
-
+	device_printf(dev, "Line6 device attached - %s registered\n",
+	    info->name);
 	return 0;
+
+fail:
+	if (sc->xfer_setup) {
+		usbd_transfer_unsetup(sc->play.xfer, LINE6_NCHANBUFS + 1);
+		usbd_transfer_unsetup(sc->rec.xfer,  LINE6_NCHANBUFS + 1);
+		sc->xfer_setup = 0;
+	}
+	if (mtx_initialized(&sc->sc_lock))
+		mtx_destroy(&sc->sc_lock);
+	return ENXIO;
 }
 
 static int
@@ -505,10 +919,30 @@ line6_bsd_detach(device_t dev)
 	if (sc == NULL)
 		return 0;
 
+	/* Stop and tear down USB isochronous transfers */
+	if (sc->xfer_setup) {
+		mtx_lock(&sc->sc_lock);
+		sc->play.running = 0;
+		sc->rec.running  = 0;
+		usbd_transfer_stop(sc->play.xfer[0]);
+		usbd_transfer_stop(sc->play.xfer[1]);
+		usbd_transfer_stop(sc->rec.xfer[0]);
+		usbd_transfer_stop(sc->rec.xfer[1]);
+		mtx_unlock(&sc->sc_lock);
+
+		usbd_transfer_unsetup(sc->play.xfer, LINE6_NCHANBUFS + 1);
+		usbd_transfer_unsetup(sc->rec.xfer,  LINE6_NCHANBUFS + 1);
+		sc->xfer_setup = 0;
+	}
+
 	if (sc->alsa_line6 != NULL) {
 		card = (struct snd_card *)sc->alsa_line6;
 		snd_card_free(card);
+		sc->alsa_line6 = NULL;
 	}
+
+	if (mtx_initialized(&sc->sc_lock))
+		mtx_destroy(&sc->sc_lock);
 
 	return 0;
 }
