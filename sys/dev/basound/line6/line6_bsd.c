@@ -40,9 +40,15 @@ MALLOC_DECLARE(M_ALSA);
  * USB isochronous transport parameters.
  * Full-speed USB (12 Mbps) has 1 ms frames → 1000 fps.
  * Use 8 frames per transfer → 8 ms batches, low enough for JACK.
+ *
+ * POD Studio / TonePort layout: single USB interface (0) with multiple
+ * alt settings.  Alt 0 = zero-bandwidth (interrupt IN only).
+ * Alt 2 = audio streaming (ISO OUT 0x01 + ISO IN 0x82 on interface 0).
+ * This matches what Linux sound/usb/line6/toneport.c selects.
  */
 #define LINE6_NFRAMES		8	/* ISO frames per USB transfer */
 #define LINE6_NCHANBUFS		2	/* double-buffered outstanding transfers */
+#define LINE6_ALT_AUDIO		2	/* bAlternateSetting index for ISO audio */
 
 /*
  * Per-direction audio stream state.  One instance lives in the softc for
@@ -211,9 +217,8 @@ struct line6_bsd_softc {
 	struct line6_audio_stream play;
 	struct line6_audio_stream rec;
 	uint8_t		 ctrl_iface_index; /* USB interface for AudioControl */
-	uint8_t		 play_iface_index; /* USB interface for playback OUT */
-	uint8_t		 rec_iface_index;  /* USB interface for capture IN */
-	/* xfer_setup removed: transfers are set up/torn down per trigger */
+	uint8_t		 audio_iface_index; /* USB interface hosting ISO endpoints */
+	uint32_t	 audio_active;	/* bitmask: 1=play, 2=rec; 0=none active */
 };
 
 MALLOC_DEFINE(M_LINE6_BSD, "line6_bsd", "Line6 BSD softc");
@@ -286,59 +291,32 @@ static const struct usb_config line6_rec_cfg[LINE6_NCHANBUFS + 1] = {
 };
 
 /*
- * Walk the USB configuration descriptor to discover the interface indices of
- * the audio streaming interfaces.  UAC 1.0 layout: iface 0 = AudioControl,
- * iface 1 = AudioStreaming OUT (playback), iface 2 = AudioStreaming IN.
- * Falls back to hardcoded defaults if descriptors are non-standard.
+ * Check whether interface 0 has ISO audio endpoints on some alt setting.
+ * Line6 POD Studio / TonePort devices have a single USB interface (0).
+ * Alt setting 0 = zero-bandwidth (AudioControl only, interrupt IN).
+ * Alt settings 1..4 = audio streaming (ISO OUT 0x01 + ISO IN 0x82).
+ * Returns non-zero if ISO endpoints are found, 0 if none.
  */
 static int
-line6_find_audio_ifaces(struct usb_device *udev,
-    uint8_t *play_iface, uint8_t *rec_iface)
+line6_has_iso_endpoints(struct usb_device *udev)
 {
 	struct usb_config_descriptor *cd;
 	struct usb_descriptor *desc;
-	struct usb_interface_descriptor *id;
 	struct usb_endpoint_descriptor *ed;
-	uint8_t cur_iface;
-	int in_audio_stream;
-	int found_play, found_rec;
 
 	cd = usbd_get_config_descriptor(udev);
 	if (cd == NULL)
-		return ENXIO;
+		return 0;
 
 	desc = NULL;
-	cur_iface = 0;
-	in_audio_stream = 0;
-	found_play = 0;
-	found_rec = 0;
-
 	while ((desc = usb_desc_foreach(cd, desc)) != NULL) {
-		if (desc->bDescriptorType == UDESC_INTERFACE) {
-			id = (struct usb_interface_descriptor *)desc;
-			cur_iface = id->bInterfaceNumber;
-			/* Audio Streaming alternate with at least one endpoint */
-			in_audio_stream = (id->bInterfaceClass == UICLASS_AUDIO &&
-			    id->bInterfaceSubClass == UISUBCLASS_AUDIOSTREAM &&
-			    id->bNumEndpoints > 0) ? 1 : 0;
-		} else if (desc->bDescriptorType == UDESC_ENDPOINT &&
-		    in_audio_stream) {
+		if (desc->bDescriptorType == UDESC_ENDPOINT) {
 			ed = (struct usb_endpoint_descriptor *)desc;
-			if (UE_GET_XFERTYPE(ed->bmAttributes) == UE_ISOCHRONOUS) {
-				if (UE_GET_DIR(ed->bEndpointAddress) == UE_DIR_OUT) {
-					*play_iface = cur_iface;
-					found_play = 1;
-				} else {
-					*rec_iface = cur_iface;
-					found_rec = 1;
-				}
-				in_audio_stream = 0; /* one endpoint per iface */
-			}
+			if (UE_GET_XFERTYPE(ed->bmAttributes) == UE_ISOCHRONOUS)
+				return 1;
 		}
 	}
-
-	/* Need at least one direction to be useful */
-	return (found_play || found_rec) ? 0 : ENXIO;
+	return 0;
 }
 
 /* Sync endpoint callback: no-op (informational only) */
@@ -621,10 +599,10 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START: {
-		uint8_t iface_idx;
 		const struct usb_config *cfg;
 		usb_error_t uerr;
 		uint32_t channels, bps, sample_size;
+		uint32_t stream_bit;
 
 		if (runtime->dma_area == NULL || runtime->dma_bytes == 0)
 			return -EINVAL;
@@ -639,43 +617,45 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 			bps = 2;	/* S16_LE default */
 		sample_size = channels * bps;
 
-		iface_idx = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
-		    sc->play_iface_index : sc->rec_iface_index;
 		cfg = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
 		    line6_play_cfg : line6_rec_cfg;
+		stream_bit = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		    1 : 2;
 
 		/*
-		 * Switch to the operational alternate setting (alt=1 has the
-		 * ISO endpoint; alt=0 is zero-bandwidth).  Must happen before
-		 * usbd_transfer_setup so the setup code can find the endpoint.
-		 * Called without sc_lock (usbd_set_alt_interface_index sleeps).
+		 * Switch interface 0 to the audio alt setting so the ISO
+		 * endpoints become visible.  FreeBSD's usbd_set_alt_interface_index
+		 * is idempotent if already at the requested alt index, so it is
+		 * safe to call for both play and rec.
+		 * Must NOT be called with sc_lock held (sleepable lock internally).
 		 */
-		uerr = usbd_set_alt_interface_index(sc->usbdev, iface_idx, 1);
+		uerr = usbd_set_alt_interface_index(sc->usbdev,
+		    sc->audio_iface_index, LINE6_ALT_AUDIO);
 		if (uerr != 0) {
 			device_printf(sc->dev,
-			    "set alt 1 failed on iface %u: %s\n",
-			    iface_idx, usbd_errstr(uerr));
+			    "set alt %u failed on iface %u: %s\n",
+			    LINE6_ALT_AUDIO, sc->audio_iface_index,
+			    usbd_errstr(uerr));
 			return -EIO;
 		}
 
 		/*
-		 * Set up ISO transfers now that alt=1 endpoints are visible.
+		 * Set up ISO transfers now that alt endpoints are visible.
 		 * usbd_transfer_setup must NOT be called with sc_lock held.
-		 * Pass 'st' (the per-direction stream struct) as the context;
-		 * the callbacks retrieve it via usbd_xfer_softc() and derive
-		 * 'sc' back via __containerof.
 		 */
-		uerr = usbd_transfer_setup(sc->usbdev, &iface_idx,
+		uerr = usbd_transfer_setup(sc->usbdev, &sc->audio_iface_index,
 		    st->xfer, cfg, LINE6_NCHANBUFS + 1, st, &sc->sc_lock);
 		if (uerr != 0) {
 			device_printf(sc->dev,
 			    "transfer setup failed: %s\n", usbd_errstr(uerr));
-			(void)usbd_set_alt_interface_index(sc->usbdev,
-			    iface_idx, 0);
+			if (sc->audio_active == 0)
+				(void)usbd_set_alt_interface_index(sc->usbdev,
+				    sc->audio_iface_index, 0);
 			return -EIO;
 		}
 
 		mtx_lock(&sc->sc_lock);
+		sc->audio_active |= stream_bit;
 		st->frames_per_second = usbd_get_isoc_fps(sc->usbdev);
 		if (st->frames_per_second == 0)
 			st->frames_per_second = 1000;	/* full-speed fallback */
@@ -703,12 +683,12 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH: {
-		uint8_t iface_idx = (substream->stream ==
-		    SNDRV_PCM_STREAM_PLAYBACK) ?
-		    sc->play_iface_index : sc->rec_iface_index;
+		uint32_t stream_bit = (substream->stream ==
+		    SNDRV_PCM_STREAM_PLAYBACK) ? 1 : 2;
 
 		mtx_lock(&sc->sc_lock);
 		st->running = 0;
+		sc->audio_active &= ~stream_bit;
 		usbd_transfer_stop(st->xfer[0]);
 		usbd_transfer_stop(st->xfer[1]);
 		usbd_transfer_stop(st->xfer[2]);	/* sync (no-op if NULL) */
@@ -717,34 +697,37 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		/* Must be called without sc_lock held */
 		usbd_transfer_unsetup(st->xfer, LINE6_NCHANBUFS + 1);
 
-		/* Release ISO bandwidth back to the bus */
-		(void)usbd_set_alt_interface_index(sc->usbdev, iface_idx, 0);
+		/* Release ISO bandwidth only when both streams are stopped */
+		if (sc->audio_active == 0)
+			(void)usbd_set_alt_interface_index(sc->usbdev,
+			    sc->audio_iface_index, 0);
 
 		runtime->state = SNDRV_PCM_STATE_STOPPED;
 		return 0;
 	}
 
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE: {
-		/* Re-setup and restart (mirrors START logic) */
-		uint8_t iface_idx = (substream->stream ==
-		    SNDRV_PCM_STREAM_PLAYBACK) ?
-		    sc->play_iface_index : sc->rec_iface_index;
 		const struct usb_config *cfg = (substream->stream ==
 		    SNDRV_PCM_STREAM_PLAYBACK) ?
 		    line6_play_cfg : line6_rec_cfg;
+		uint32_t stream_bit = (substream->stream ==
+		    SNDRV_PCM_STREAM_PLAYBACK) ? 1 : 2;
 		usb_error_t uerr;
 
-		uerr = usbd_set_alt_interface_index(sc->usbdev, iface_idx, 1);
+		uerr = usbd_set_alt_interface_index(sc->usbdev,
+		    sc->audio_iface_index, LINE6_ALT_AUDIO);
 		if (uerr != 0)
 			return -EIO;
-		uerr = usbd_transfer_setup(sc->usbdev, &iface_idx,
+		uerr = usbd_transfer_setup(sc->usbdev, &sc->audio_iface_index,
 		    st->xfer, cfg, LINE6_NCHANBUFS + 1, st, &sc->sc_lock);
 		if (uerr != 0) {
-			(void)usbd_set_alt_interface_index(sc->usbdev,
-			    iface_idx, 0);
+			if (sc->audio_active == 0)
+				(void)usbd_set_alt_interface_index(sc->usbdev,
+				    sc->audio_iface_index, 0);
 			return -EIO;
 		}
 		mtx_lock(&sc->sc_lock);
+		sc->audio_active |= stream_bit;
 		st->running = 1;
 		usbd_transfer_start(st->xfer[0]);
 		usbd_transfer_start(st->xfer[1]);
@@ -864,35 +847,20 @@ line6_bsd_attach(device_t dev)
 	device_printf(dev, "Attaching %s (USB %04x:%04x)\n",
 	    info->name, uaa->info.idVendor, uaa->info.idProduct);
 
-	/* Discover audio streaming interface indices from USB descriptors */
+	/*
+	 * POD Studio / TonePort: single USB interface (0) with multiple alt
+	 * settings.  Alt 0 = zero-bandwidth.  Alt LINE6_ALT_AUDIO activates
+	 * ISO OUT (0x01) and ISO IN (0x82) endpoints on the same interface.
+	 * The ISO endpoints appear in the config descriptor under alt settings
+	 * of interface 0, which is why ifaces_max=1 is normal and correct.
+	 */
+	sc->audio_iface_index = sc->ctrl_iface_index; /* always iface 0 */
+	sc->audio_active = 0;
+
 	if (info->capabilities & (LINE6_CAP_AUDIO_IN | LINE6_CAP_AUDIO_OUT)) {
-		err = line6_find_audio_ifaces(sc->usbdev,
-		    &sc->play_iface_index, &sc->rec_iface_index);
-		if (err != 0) {
-			/* UAC 1.0 fallback: AC=0, AS-play=1, AS-rec=2 */
-			sc->play_iface_index = 1;
-			sc->rec_iface_index  = 2;
-			device_printf(dev, "descriptor scan failed, "
-			    "using default iface indices (play=1 rec=2)\n");
-		} else {
-			device_printf(dev, "found audio ifaces: play=%u rec=%u\n",
-			    sc->play_iface_index, sc->rec_iface_index);
-		}
-		/*
-		 * Claim the streaming interfaces so the USB stack lets us
-		 * call usbd_set_alt_interface_index() on them later.
-		 * Without this, usbd_set_alt_interface_index() returns
-		 * USB_ERR_INVAL because those interfaces aren't "ours".
-		 */
-		usbd_set_parent_iface(sc->usbdev, sc->play_iface_index,
-		    sc->ctrl_iface_index);
-		usbd_set_parent_iface(sc->usbdev, sc->rec_iface_index,
-		    sc->ctrl_iface_index);
-		/*
-		 * USB isochronous transfers are NOT set up here.  Alt=0 has
-		 * no ISO endpoints; setup must happen in line6_pcm_trigger
-		 * after switching to alt=1.
-		 */
+		if (!line6_has_iso_endpoints(sc->usbdev))
+			device_printf(dev, "warning: no ISO endpoints found in "
+			    "descriptor (alt setting change will be needed)\n");
 	}
 
 	/* Create ALSA sound card */
