@@ -163,17 +163,23 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 	}
 
 	/*
-	 * Use enough blocks so the ring buffer holds at least 4 KB.
-	 * For USB audio this matters: one USB transfer can deliver
-	 * ~1.5 KB (8 ISO frames × 192 bytes each at 48 kHz stereo
-	 * S16LE) so a 512-byte ring (2 × 256) would wrap mid-transfer,
-	 * breaking getptr() tracking.  min=2 keeps double-buffering
-	 * for large-block HDSP; 4096/blocksize gives extra blocks for
-	 * small-fragment USB probes.
+	 * Size the ring buffer generously to absorb USB timing jitter.
+	 *
+	 * USB isochronous audio delivers data in fixed-size bursts
+	 * (LINE6: 8 ISO frames × 192 bytes = 1536 bytes per transfer)
+	 * with two transfers in flight simultaneously.  At startup,
+	 * both transfers are submitted before the first chn_intr fires,
+	 * consuming 3072 bytes immediately.  If the ring is only 4096
+	 * bytes (blkcnt=2 × blocksize=2048), that leaves just 1024 bytes
+	 * of margin — any scheduling jitter causes an xrun.
+	 *
+	 * Target at least 16 KB so there is always several USB transfers
+	 * worth of headroom.  For HDSP (PCI DMA) this just pre-allocates
+	 * a slightly larger DMA region, which is harmless.
 	 */
-	uint32_t blkcnt = 4096 / blocksize;
-	if (blkcnt < 2)
-		blkcnt = 2;
+	uint32_t blkcnt = 16384 / blocksize;
+	if (blkcnt < 4)
+		blkcnt = 4;
 	sndbuf_resize(ch->buffer, blkcnt, blocksize);
 
 	/* Keep runtime in sync with the logical buffer size so that
