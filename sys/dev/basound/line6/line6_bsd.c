@@ -210,6 +210,7 @@ struct line6_bsd_softc {
 	struct mtx	 sc_lock;	/* serialises USB state; USB callback mutex */
 	struct line6_audio_stream play;
 	struct line6_audio_stream rec;
+	uint8_t		 ctrl_iface_index; /* USB interface for AudioControl */
 	uint8_t		 play_iface_index; /* USB interface for playback OUT */
 	uint8_t		 rec_iface_index;  /* USB interface for capture IN */
 	/* xfer_setup removed: transfers are set up/torn down per trigger */
@@ -852,6 +853,7 @@ line6_bsd_attach(device_t dev)
 		device_printf(dev, "Failed to get interface descriptor\n");
 		return ENXIO;
 	}
+	sc->ctrl_iface_index = uaa->info.bIfaceIndex;
 
 	sc->capabilities = info->capabilities;
 	sc->device_name = info->name;
@@ -876,6 +878,16 @@ line6_bsd_attach(device_t dev)
 			device_printf(dev, "found audio ifaces: play=%u rec=%u\n",
 			    sc->play_iface_index, sc->rec_iface_index);
 		}
+		/*
+		 * Claim the streaming interfaces so the USB stack lets us
+		 * call usbd_set_alt_interface_index() on them later.
+		 * Without this, usbd_set_alt_interface_index() returns
+		 * USB_ERR_INVAL because those interfaces aren't "ours".
+		 */
+		usbd_set_parent_iface(sc->usbdev, sc->play_iface_index,
+		    sc->ctrl_iface_index);
+		usbd_set_parent_iface(sc->usbdev, sc->rec_iface_index,
+		    sc->ctrl_iface_index);
 		/*
 		 * USB isochronous transfers are NOT set up here.  Alt=0 has
 		 * no ISO endpoints; setup must happen in line6_pcm_trigger
