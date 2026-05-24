@@ -660,9 +660,12 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		/*
 		 * Set up ISO transfers now that alt=1 endpoints are visible.
 		 * usbd_transfer_setup must NOT be called with sc_lock held.
+		 * Pass 'st' (the per-direction stream struct) as the context;
+		 * the callbacks retrieve it via usbd_xfer_softc() and derive
+		 * 'sc' back via __containerof.
 		 */
 		uerr = usbd_transfer_setup(sc->usbdev, &iface_idx,
-		    st->xfer, cfg, LINE6_NCHANBUFS + 1, sc, &sc->sc_lock);
+		    st->xfer, cfg, LINE6_NCHANBUFS + 1, st, &sc->sc_lock);
 		if (uerr != 0) {
 			device_printf(sc->dev,
 			    "transfer setup failed: %s\n", usbd_errstr(uerr));
@@ -734,7 +737,7 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		if (uerr != 0)
 			return -EIO;
 		uerr = usbd_transfer_setup(sc->usbdev, &iface_idx,
-		    st->xfer, cfg, LINE6_NCHANBUFS + 1, sc, &sc->sc_lock);
+		    st->xfer, cfg, LINE6_NCHANBUFS + 1, st, &sc->sc_lock);
 		if (uerr != 0) {
 			(void)usbd_set_alt_interface_index(sc->usbdev,
 			    iface_idx, 0);
