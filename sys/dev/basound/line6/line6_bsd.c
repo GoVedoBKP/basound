@@ -212,7 +212,7 @@ struct line6_bsd_softc {
 	struct line6_audio_stream rec;
 	uint8_t		 play_iface_index; /* USB interface for playback OUT */
 	uint8_t		 rec_iface_index;  /* USB interface for capture IN */
-	int		 xfer_setup;	/* 1 if usbd_transfer_setup succeeded */
+	/* xfer_setup removed: transfers are set up/torn down per trigger */
 };
 
 MALLOC_DEFINE(M_LINE6_BSD, "line6_bsd", "Line6 BSD softc");
@@ -599,7 +599,6 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	struct snd_pcm_runtime *runtime;
 	struct line6_bsd_softc *sc;
 	struct line6_audio_stream *st;
-	uint32_t channels, bps, sample_size;
 
 	if (substream == NULL || substream->runtime == NULL ||
 	    substream->pcm == NULL || substream->pcm->card == NULL ||
@@ -620,7 +619,12 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	    &sc->play : &sc->rec;
 
 	switch (cmd) {
-	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_START: {
+		uint8_t iface_idx;
+		const struct usb_config *cfg;
+		usb_error_t uerr;
+		uint32_t channels, bps, sample_size;
+
 		if (runtime->dma_area == NULL || runtime->dma_bytes == 0)
 			return -EINVAL;
 
@@ -634,21 +638,37 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 			bps = 2;	/* S16_LE default */
 		sample_size = channels * bps;
 
+		iface_idx = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		    sc->play_iface_index : sc->rec_iface_index;
+		cfg = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		    line6_play_cfg : line6_rec_cfg;
+
 		/*
-		 * Switch the USB AudioStreaming interface to alternate
-		 * setting 1 (operational bandwidth).  Alt 0 has no
-		 * endpoints; the ISO endpoint only exists on alt 1.
-		 * Must be done before sc_lock is held (it sleeps).
+		 * Switch to the operational alternate setting (alt=1 has the
+		 * ISO endpoint; alt=0 is zero-bandwidth).  Must happen before
+		 * usbd_transfer_setup so the setup code can find the endpoint.
+		 * Called without sc_lock (usbd_set_alt_interface_index sleeps).
 		 */
-		{
-			int xfer_bit = (substream->stream ==
-			    SNDRV_PCM_STREAM_PLAYBACK) ? 1 : 2;
-			if (sc->xfer_setup & xfer_bit) {
-				uint8_t iface = (substream->stream ==
-				    SNDRV_PCM_STREAM_PLAYBACK) ?
-				    sc->play_iface_index : sc->rec_iface_index;
-				usbd_set_alt_interface_index(sc->usbdev, iface, 1);
-			}
+		uerr = usbd_set_alt_interface_index(sc->usbdev, iface_idx, 1);
+		if (uerr != 0) {
+			device_printf(sc->dev,
+			    "set alt 1 failed on iface %u: %s\n",
+			    iface_idx, usbd_errstr(uerr));
+			return -EIO;
+		}
+
+		/*
+		 * Set up ISO transfers now that alt=1 endpoints are visible.
+		 * usbd_transfer_setup must NOT be called with sc_lock held.
+		 */
+		uerr = usbd_transfer_setup(sc->usbdev, &iface_idx,
+		    st->xfer, cfg, LINE6_NCHANBUFS + 1, sc, &sc->sc_lock);
+		if (uerr != 0) {
+			device_printf(sc->dev,
+			    "transfer setup failed: %s\n", usbd_errstr(uerr));
+			(void)usbd_set_alt_interface_index(sc->usbdev,
+			    iface_idx, 0);
+			return -EIO;
 		}
 
 		mtx_lock(&sc->sc_lock);
@@ -668,51 +688,62 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		st->pcm_ch = ch->channel;
 		st->running = 1;
 
-		{
-			int xfer_bit = (substream->stream ==
-			    SNDRV_PCM_STREAM_PLAYBACK) ? 1 : 2;
-			if (sc->xfer_setup & xfer_bit) {
-				usbd_transfer_start(st->xfer[0]);
-				usbd_transfer_start(st->xfer[1]);
-			}
-		}
+		usbd_transfer_start(st->xfer[0]);
+		usbd_transfer_start(st->xfer[1]);
 		mtx_unlock(&sc->sc_lock);
 
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
 		runtime->dma_position = 0;
 		return 0;
+	}
 
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH: {
-		int xfer_bit = (substream->stream ==
-		    SNDRV_PCM_STREAM_PLAYBACK) ? 1 : 2;
+		uint8_t iface_idx = (substream->stream ==
+		    SNDRV_PCM_STREAM_PLAYBACK) ?
+		    sc->play_iface_index : sc->rec_iface_index;
+
 		mtx_lock(&sc->sc_lock);
 		st->running = 0;
-		if (sc->xfer_setup & xfer_bit) {
-			usbd_transfer_stop(st->xfer[0]);
-			usbd_transfer_stop(st->xfer[1]);
-		}
+		usbd_transfer_stop(st->xfer[0]);
+		usbd_transfer_stop(st->xfer[1]);
+		usbd_transfer_stop(st->xfer[2]);	/* sync (no-op if NULL) */
 		mtx_unlock(&sc->sc_lock);
+
+		/* Must be called without sc_lock held */
+		usbd_transfer_unsetup(st->xfer, LINE6_NCHANBUFS + 1);
+
+		/* Release ISO bandwidth back to the bus */
+		(void)usbd_set_alt_interface_index(sc->usbdev, iface_idx, 0);
+
 		runtime->state = SNDRV_PCM_STATE_STOPPED;
-		/* Switch back to zero-bandwidth alt 0 to release USB bandwidth */
-		if (sc->xfer_setup & xfer_bit) {
-			uint8_t iface = (substream->stream ==
-			    SNDRV_PCM_STREAM_PLAYBACK) ?
-			    sc->play_iface_index : sc->rec_iface_index;
-			usbd_set_alt_interface_index(sc->usbdev, iface, 0);
-		}
 		return 0;
 	}
 
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE: {
-		int xfer_bit = (substream->stream ==
-		    SNDRV_PCM_STREAM_PLAYBACK) ? 1 : 2;
+		/* Re-setup and restart (mirrors START logic) */
+		uint8_t iface_idx = (substream->stream ==
+		    SNDRV_PCM_STREAM_PLAYBACK) ?
+		    sc->play_iface_index : sc->rec_iface_index;
+		const struct usb_config *cfg = (substream->stream ==
+		    SNDRV_PCM_STREAM_PLAYBACK) ?
+		    line6_play_cfg : line6_rec_cfg;
+		usb_error_t uerr;
+
+		uerr = usbd_set_alt_interface_index(sc->usbdev, iface_idx, 1);
+		if (uerr != 0)
+			return -EIO;
+		uerr = usbd_transfer_setup(sc->usbdev, &iface_idx,
+		    st->xfer, cfg, LINE6_NCHANBUFS + 1, sc, &sc->sc_lock);
+		if (uerr != 0) {
+			(void)usbd_set_alt_interface_index(sc->usbdev,
+			    iface_idx, 0);
+			return -EIO;
+		}
 		mtx_lock(&sc->sc_lock);
 		st->running = 1;
-		if (sc->xfer_setup & xfer_bit) {
-			usbd_transfer_start(st->xfer[0]);
-			usbd_transfer_start(st->xfer[1]);
-		}
+		usbd_transfer_start(st->xfer[0]);
+		usbd_transfer_start(st->xfer[1]);
 		mtx_unlock(&sc->sc_lock);
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
 		return 0;
@@ -796,7 +827,6 @@ line6_bsd_attach(device_t dev)
 	const struct line6_device_info *info;
 	struct snd_card *card;
 	struct snd_pcm *pcm;
-	usb_error_t uerr;
 	int err;
 
 	uaa = device_get_ivars(dev);
@@ -843,36 +873,11 @@ line6_bsd_attach(device_t dev)
 			device_printf(dev, "found audio ifaces: play=%u rec=%u\n",
 			    sc->play_iface_index, sc->rec_iface_index);
 		}
-
-		/* Set up USB isochronous transfers for playback */
-		if (info->capabilities & LINE6_CAP_AUDIO_OUT) {
-			uerr = usbd_transfer_setup(sc->usbdev,
-			    &sc->play_iface_index,
-			    sc->play.xfer, line6_play_cfg,
-			    LINE6_NCHANBUFS + 1,
-			    &sc->play, &sc->sc_lock);
-			if (uerr != 0)
-				device_printf(dev,
-				    "play transfer setup failed: %s\n",
-				    usbd_errstr(uerr));
-			else
-				sc->xfer_setup |= 1;
-		}
-
-		/* Set up USB isochronous transfers for capture */
-		if (info->capabilities & LINE6_CAP_AUDIO_IN) {
-			uerr = usbd_transfer_setup(sc->usbdev,
-			    &sc->rec_iface_index,
-			    sc->rec.xfer, line6_rec_cfg,
-			    LINE6_NCHANBUFS + 1,
-			    &sc->rec, &sc->sc_lock);
-			if (uerr != 0)
-				device_printf(dev,
-				    "rec transfer setup failed: %s\n",
-				    usbd_errstr(uerr));
-			else
-				sc->xfer_setup |= 2;
-		}
+		/*
+		 * USB isochronous transfers are NOT set up here.  Alt=0 has
+		 * no ISO endpoints; setup must happen in line6_pcm_trigger
+		 * after switching to alt=1.
+		 */
 	}
 
 	/* Create ALSA sound card */
@@ -935,11 +940,6 @@ line6_bsd_attach(device_t dev)
 	return 0;
 
 fail:
-	if (sc->xfer_setup & 1)
-		usbd_transfer_unsetup(sc->play.xfer, LINE6_NCHANBUFS + 1);
-	if (sc->xfer_setup & 2)
-		usbd_transfer_unsetup(sc->rec.xfer,  LINE6_NCHANBUFS + 1);
-	sc->xfer_setup = 0;
 	if (mtx_initialized(&sc->sc_lock))
 		mtx_destroy(&sc->sc_lock);
 	return ENXIO;
@@ -955,26 +955,24 @@ line6_bsd_detach(device_t dev)
 	if (sc == NULL)
 		return 0;
 
-	/* Stop and tear down USB isochronous transfers */
-	if (sc->xfer_setup) {
+	/* Stop and tear down USB isochronous transfers if still running */
+	if (sc->play.xfer[0] != NULL) {
 		mtx_lock(&sc->sc_lock);
 		sc->play.running = 0;
-		sc->rec.running  = 0;
-		if (sc->xfer_setup & 1) {
-			usbd_transfer_stop(sc->play.xfer[0]);
-			usbd_transfer_stop(sc->play.xfer[1]);
-		}
-		if (sc->xfer_setup & 2) {
-			usbd_transfer_stop(sc->rec.xfer[0]);
-			usbd_transfer_stop(sc->rec.xfer[1]);
-		}
+		usbd_transfer_stop(sc->play.xfer[0]);
+		usbd_transfer_stop(sc->play.xfer[1]);
+		usbd_transfer_stop(sc->play.xfer[2]);
 		mtx_unlock(&sc->sc_lock);
-
-		if (sc->xfer_setup & 1)
-			usbd_transfer_unsetup(sc->play.xfer, LINE6_NCHANBUFS + 1);
-		if (sc->xfer_setup & 2)
-			usbd_transfer_unsetup(sc->rec.xfer,  LINE6_NCHANBUFS + 1);
-		sc->xfer_setup = 0;
+		usbd_transfer_unsetup(sc->play.xfer, LINE6_NCHANBUFS + 1);
+	}
+	if (sc->rec.xfer[0] != NULL) {
+		mtx_lock(&sc->sc_lock);
+		sc->rec.running = 0;
+		usbd_transfer_stop(sc->rec.xfer[0]);
+		usbd_transfer_stop(sc->rec.xfer[1]);
+		usbd_transfer_stop(sc->rec.xfer[2]);
+		mtx_unlock(&sc->sc_lock);
+		usbd_transfer_unsetup(sc->rec.xfer, LINE6_NCHANBUFS + 1);
 	}
 
 	if (sc->alsa_line6 != NULL) {
