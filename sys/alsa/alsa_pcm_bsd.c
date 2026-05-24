@@ -162,8 +162,25 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 			ops->hw_params(substream, NULL);
 	}
 
-	/* Set the logical buffer to exactly 2 blocks for double-buffering. */
-	sndbuf_resize(ch->buffer, 2, blocksize);
+	/*
+	 * Use enough blocks so the ring buffer holds at least 4 KB.
+	 * For USB audio this matters: one USB transfer can deliver
+	 * ~1.5 KB (8 ISO frames × 192 bytes each at 48 kHz stereo
+	 * S16LE) so a 512-byte ring (2 × 256) would wrap mid-transfer,
+	 * breaking getptr() tracking.  min=2 keeps double-buffering
+	 * for large-block HDSP; 4096/blocksize gives extra blocks for
+	 * small-fragment USB probes.
+	 */
+	uint32_t blkcnt = 4096 / blocksize;
+	if (blkcnt < 2)
+		blkcnt = 2;
+	sndbuf_resize(ch->buffer, blkcnt, blocksize);
+
+	/* Keep runtime in sync with the logical buffer size so that
+	 * the USB ring-buffer math (st->end = start + dma_bytes) agrees
+	 * with what the PCM layer thinks the buffer size is. */
+	if (ch->runtime != NULL)
+		ch->runtime->dma_bytes = sndbuf_getsize(ch->buffer);
 
 	return blocksize;
 }
@@ -300,8 +317,12 @@ basound_chan_trigger(kobj_t obj, void *data, int go)
 		return 0;
 	}
 
-	if (ops && ops->trigger)
-		return ops->trigger(substream, alsa_cmd);
+	if (ops && ops->trigger) {
+		/* ALSA ops return Linux-style negative errno; FreeBSD channel
+		 * methods must return 0 on success or a positive errno. */
+		int err = ops->trigger(substream, alsa_cmd);
+		return (err < 0) ? -err : err;
+	}
 
 	return 0;
 }
@@ -367,15 +388,15 @@ basound_pcm_attach(device_t dev)
 	pcm_init(dev, pcm);
 
 	/*
-	 * HDSP is a professional multi-channel audio interface.  Enable
-	 * bitperfect mode so that the channel count is not clamped to
-	 * SND_CHN_MAX and no feeder conversions are inserted.  This lets
-	 * JACK and other pro-audio clients open /dev/dspN with the full
-	 * 18-channel (Multiface) or 26-channel (Digiface) configuration.
+	 * Only enable bitperfect mode for multi-channel devices (e.g. HDSP
+	 * with 18/26 channels).  For stereo USB devices like Line6, leave it
+	 * off so the PCM layer handles normal format negotiation.
 	 */
-	pcm_setflags(dev, pcm_getflags(dev) | SD_F_BITPERFECT);
-	printf("basound: bitperfect flags=0x%08x SD_F_BITPERFECT=%d\n",
-	    pcm_getflags(dev), !!(pcm_getflags(dev) & SD_F_BITPERFECT));
+	if (pcm->private_data != NULL) {
+		pcm_setflags(dev, pcm_getflags(dev) | SD_F_BITPERFECT);
+		printf("basound: bitperfect flags=0x%08x SD_F_BITPERFECT=%d\n",
+		    pcm_getflags(dev), !!(pcm_getflags(dev) & SD_F_BITPERFECT));
+	}
 
 	/*
 	 * Add channels before pcm_register().  pcm_register() inspects
