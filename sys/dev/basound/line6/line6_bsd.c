@@ -92,6 +92,7 @@ struct line6_audio_stream {
 #define LINE6_CAP_AUDIO_OUT	0x0004  /* Device has audio output */
 #define LINE6_CAP_MIDI		0x0008  /* Device has MIDI I/O */
 #define LINE6_CAP_FIRMWARE	0x0010  /* Device supports firmware updates */
+#define LINE6_CAP_INIT_TONEPORT	0x0020	/* Device needs 0x0301 init command */
 
 struct line6_device_info {
 	uint16_t product_id;
@@ -163,35 +164,40 @@ static const struct line6_device_info line6_devices[] = {
 		.name = "Line6 POD Studio UX1",
 		.card_id = "Line6PODStudioUX1",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
-				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI
+				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
+				LINE6_CAP_INIT_TONEPORT
 	},
 	{
 		.product_id = LINE6_PRODUCT_PODSTUDIO_UX2,
 		.name = "Line6 POD Studio UX2",
 		.card_id = "Line6PODStudioUX2",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
-				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI
+				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
+				LINE6_CAP_INIT_TONEPORT
 	},
 	{
 		.product_id = LINE6_PRODUCT_TONEPORT_UX1,
 		.name = "Line6 TonePort UX1",
 		.card_id = "Line6TonePortUX1",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
-				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI
+				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
+				LINE6_CAP_INIT_TONEPORT
 	},
 	{
 		.product_id = LINE6_PRODUCT_TONEPORT_UX2,
 		.name = "Line6 TonePort UX2",
 		.card_id = "Line6TonePortUX2",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
-				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI
+				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
+				LINE6_CAP_INIT_TONEPORT
 	},
 	{
 		.product_id = LINE6_PRODUCT_TONEPORT_GX,
 		.name = "Line6 TonePort GX",
 		.card_id = "Line6TonePortGX",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
-				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI
+				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
+				LINE6_CAP_INIT_TONEPORT
 	},
 	{
 		.product_id = LINE6_PRODUCT_VARIAX,
@@ -501,6 +507,24 @@ line6_bsd_find_device(uint16_t product_id)
 	return NULL;
 }
 
+/*
+ * Send a vendor-specific control command to the Line6 device.
+ * Used for initialization (e.g., 0x0301 to enable TonePort audio).
+ */
+static usb_error_t
+line6_send_cmd(struct usb_device *udev, uint16_t cmd1, uint16_t cmd2)
+{
+	struct usb_device_request req;
+
+	req.bmRequestType = UT_WRITE_VENDOR_DEVICE;
+	req.bRequest = 0x67;
+	USETW(req.wValue, cmd1);
+	USETW(req.wIndex, cmd2);
+	USETW(req.wLength, 0);		/* No data */
+
+	return (usbd_do_request(udev, NULL, &req, NULL));
+}
+
 /* PCM callback stubs - implement basic audio stream handling */
 static int
 line6_pcm_open(struct snd_pcm_substream *substream)
@@ -633,7 +657,8 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		    sc->audio_iface_index, LINE6_ALT_AUDIO);
 		if (uerr != 0) {
 			device_printf(sc->dev,
-			    "set alt %u failed on iface %u: %s\n",
+			    "set alt %u failed on iface %u: %s (is the device "
+			    "initialized correctly?)\n",
 			    LINE6_ALT_AUDIO, sc->audio_iface_index,
 			    usbd_errstr(uerr));
 			return -EIO;
@@ -856,6 +881,16 @@ line6_bsd_attach(device_t dev)
 	 */
 	sc->audio_iface_index = sc->ctrl_iface_index; /* always iface 0 */
 	sc->audio_active = 0;
+
+	if (info->capabilities & LINE6_CAP_INIT_TONEPORT) {
+		device_printf(dev, "Initializing TonePort/POD Studio\n");
+		err = line6_send_cmd(sc->usbdev, 0x0301, 0x0000);
+		if (err != 0) {
+			device_printf(dev, "Initialization failed: %s\n",
+			    usbd_errstr(err));
+			/* Continue anyway, some devices might already be initialized */
+		}
+	}
 
 	if (info->capabilities & (LINE6_CAP_AUDIO_IN | LINE6_CAP_AUDIO_OUT)) {
 		if (!line6_has_iso_endpoints(sc->usbdev))
