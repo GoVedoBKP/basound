@@ -39,14 +39,14 @@ MALLOC_DECLARE(M_ALSA);
 /*
  * USB isochronous transport parameters.
  * Full-speed USB (12 Mbps) has 1 ms frames → 1000 fps.
- * Use 8 frames per transfer → 8 ms batches, low enough for JACK.
+ * Use 64 frames per transfer → ~1.3ms batches at 48kHz.
  *
  * POD Studio / TonePort layout: single USB interface (0) with multiple
  * alt settings.  Alt 0 = zero-bandwidth (interrupt IN only).
  * Alt 2 = audio streaming (ISO OUT 0x01 + ISO IN 0x82 on interface 0).
  * This matches what Linux sound/usb/line6/toneport.c selects.
  */
-#define LINE6_NFRAMES		8	/* ISO frames per USB transfer */
+#define LINE6_NFRAMES		64	/* ISO frames per USB transfer */
 #define LINE6_NCHANBUFS		2	/* double-buffered outstanding transfers */
 #define LINE6_ALT_AUDIO		2	/* bAlternateSetting index for ISO audio */
 
