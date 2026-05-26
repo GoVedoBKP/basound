@@ -173,11 +173,11 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 	 * bytes (blkcnt=2 × blocksize=2048), that leaves just 1024 bytes
 	 * of margin — any scheduling jitter causes an xrun.
 	 *
-	 * Target at least 64 KB so there is always several USB transfers
+	 * Target at least 32 KB so there is always several USB transfers
 	 * worth of headroom.  For HDSP (PCI DMA) this just pre-allocates
 	 * a slightly larger DMA region, which is harmless.
 	 */
-	uint32_t blkcnt = 65536 / blocksize;
+	uint32_t blkcnt = 32768 / blocksize;
 	if (blkcnt < 4)
 		blkcnt = 4;
 	sndbuf_resize(ch->buffer, blkcnt, blocksize);

@@ -400,6 +400,8 @@ line6_play_callback(struct usb_xfer *xfer, usb_error_t error)
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_SETUP:
+		device_printf(sc->dev, "Play Callback: SETUP\n");
+		/* FALLTHROUGH */
 	case USB_ST_TRANSFERRED:
 		if (!st->running || st->start == NULL || st->start == st->end)
 			break;
@@ -512,6 +514,7 @@ line6_rec_callback(struct usb_xfer *xfer, usb_error_t error)
 		}
 		/* FALLTHROUGH to re-arm */
 	case USB_ST_SETUP:
+		device_printf(sc->dev, "Rec Callback: SETUP\n");
 tr_setup:
 		if (!st->running)
 			break;
@@ -970,6 +973,9 @@ line6_bsd_attach(device_t dev)
 		ticks = (uint32_t)ts.tv_sec;
 		line6_write_data(sc->usbdev, 0x80c6, &ticks, 4);
 
+		/* Select input source: Microphone (0x0a01) */
+		line6_send_cmd(sc->usbdev, 0x0a01, 0x0000);
+
 		err = line6_send_cmd(sc->usbdev, 0x0301, 0x0000);
 		if (err != 0) {
 			device_printf(dev, "Initialization (0x0301) failed: %s\n",
@@ -1061,24 +1067,17 @@ line6_bsd_detach(device_t dev)
 		return 0;
 
 	/* Stop and tear down USB isochronous transfers if still running */
-	if (sc->play.xfer[0] != NULL) {
-		mtx_lock(&sc->sc_lock);
-		sc->play.running = 0;
-		usbd_transfer_stop(sc->play.xfer[0]);
-		usbd_transfer_stop(sc->play.xfer[1]);
-		usbd_transfer_stop(sc->play.xfer[2]);
-		mtx_unlock(&sc->sc_lock);
-		usbd_transfer_unsetup(sc->play.xfer, LINE6_NCHANBUFS + 1);
+	mtx_lock(&sc->sc_lock);
+	sc->play.running = 0;
+	sc->rec.running = 0;
+	for (int i = 0; i < LINE6_NCHANBUFS + 1; i++) {
+		if (sc->play.xfer[i] != NULL) usbd_transfer_stop(sc->play.xfer[i]);
+		if (sc->rec.xfer[i] != NULL) usbd_transfer_stop(sc->rec.xfer[i]);
 	}
-	if (sc->rec.xfer[0] != NULL) {
-		mtx_lock(&sc->sc_lock);
-		sc->rec.running = 0;
-		usbd_transfer_stop(sc->rec.xfer[0]);
-		usbd_transfer_stop(sc->rec.xfer[1]);
-		usbd_transfer_stop(sc->rec.xfer[2]);
-		mtx_unlock(&sc->sc_lock);
-		usbd_transfer_unsetup(sc->rec.xfer, LINE6_NCHANBUFS + 1);
-	}
+	mtx_unlock(&sc->sc_lock);
+
+	usbd_transfer_unsetup(sc->play.xfer, LINE6_NCHANBUFS + 1);
+	usbd_transfer_unsetup(sc->rec.xfer, LINE6_NCHANBUFS + 1);
 
 	if (sc->alsa_line6 != NULL) {
 		card = (struct snd_card *)sc->alsa_line6;
