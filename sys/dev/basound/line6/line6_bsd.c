@@ -39,15 +39,15 @@ MALLOC_DECLARE(M_ALSA);
 /*
  * USB isochronous transport parameters.
  * Full-speed USB (12 Mbps) has 1 ms frames → 1000 fps.
- * Use 64 frames per transfer → ~1.3ms batches at 48kHz.
+ * Use 8 frames per transfer → 8ms batches.
  *
  * POD Studio / TonePort layout: single USB interface (0) with multiple
  * alt settings.  Alt 0 = zero-bandwidth (interrupt IN only).
  * Alt 2 = audio streaming (ISO OUT 0x01 + ISO IN 0x82 on interface 0).
  * This matches what Linux sound/usb/line6/toneport.c selects.
  */
-#define LINE6_NFRAMES		64	/* ISO frames per USB transfer */
-#define LINE6_NCHANBUFS		2	/* double-buffered outstanding transfers */
+#define LINE6_NFRAMES		8	/* ISO frames per USB transfer */
+#define LINE6_NCHANBUFS		4	/* double-buffered outstanding transfers */
 #define LINE6_ALT_AUDIO		2	/* bAlternateSetting index for ISO audio */
 
 /*
@@ -254,7 +254,25 @@ static const struct usb_config line6_play_cfg[LINE6_NCHANBUFS + 1] = {
 		.flags = {.short_xfer_ok = 1},
 		.callback = &line6_play_callback,
 	},
-	[2] = {	/* optional sync feedback endpoint (IN) */
+	[2] = {
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_OUT,
+		.bufsize = 0,
+		.frames = LINE6_NFRAMES,
+		.flags = {.short_xfer_ok = 1},
+		.callback = &line6_play_callback,
+	},
+	[3] = {
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_OUT,
+		.bufsize = 0,
+		.frames = LINE6_NFRAMES,
+		.flags = {.short_xfer_ok = 1},
+		.callback = &line6_play_callback,
+	},
+	[LINE6_NCHANBUFS] = {	/* optional sync feedback endpoint (IN) */
 		.type = UE_ISOCHRONOUS,
 		.endpoint = UE_ADDR_ANY,
 		.direction = UE_DIR_IN,
@@ -285,7 +303,25 @@ static const struct usb_config line6_rec_cfg[LINE6_NCHANBUFS + 1] = {
 		.flags = {.short_xfer_ok = 1},
 		.callback = &line6_rec_callback,
 	},
-	[2] = {	/* optional sync feedback endpoint (OUT) */
+	[2] = {
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_IN,
+		.bufsize = 0,
+		.frames = LINE6_NFRAMES,
+		.flags = {.short_xfer_ok = 1},
+		.callback = &line6_rec_callback,
+	},
+	[3] = {
+		.type = UE_ISOCHRONOUS,
+		.endpoint = UE_ADDR_ANY,
+		.direction = UE_DIR_IN,
+		.bufsize = 0,
+		.frames = LINE6_NFRAMES,
+		.flags = {.short_xfer_ok = 1},
+		.callback = &line6_rec_callback,
+	},
+	[LINE6_NCHANBUFS] = {	/* optional sync feedback endpoint (OUT) */
 		.type = UE_ISOCHRONOUS,
 		.endpoint = UE_ADDR_ANY,
 		.direction = UE_DIR_OUT,
@@ -525,6 +561,23 @@ line6_send_cmd(struct usb_device *udev, uint16_t cmd1, uint16_t cmd2)
 	return (usbd_do_request(udev, NULL, &req, NULL));
 }
 
+/*
+ * Write data to a specific address on the Line6 device using vendor request 0x67.
+ */
+static usb_error_t
+line6_write_data(struct usb_device *udev, uint16_t address, void *data, uint16_t length)
+{
+	struct usb_device_request req;
+
+	req.bmRequestType = UT_WRITE_VENDOR_DEVICE;
+	req.bRequest = 0x67;
+	USETW(req.wValue, address);
+	USETW(req.wIndex, 0);
+	USETW(req.wLength, length);
+
+	return (usbd_do_request(udev, NULL, &req, data));
+}
+
 /* PCM callback stubs - implement basic audio stream handling */
 static int
 line6_pcm_open(struct snd_pcm_substream *substream)
@@ -697,8 +750,8 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		st->pcm_ch = ch->channel;
 		st->running = 1;
 
-		usbd_transfer_start(st->xfer[0]);
-		usbd_transfer_start(st->xfer[1]);
+		for (int i = 0; i < LINE6_NCHANBUFS; i++)
+			usbd_transfer_start(st->xfer[i]);
 		mtx_unlock(&sc->sc_lock);
 
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
@@ -714,9 +767,8 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		mtx_lock(&sc->sc_lock);
 		st->running = 0;
 		sc->audio_active &= ~stream_bit;
-		usbd_transfer_stop(st->xfer[0]);
-		usbd_transfer_stop(st->xfer[1]);
-		usbd_transfer_stop(st->xfer[2]);	/* sync (no-op if NULL) */
+		for (int i = 0; i < LINE6_NCHANBUFS + 1; i++)
+			usbd_transfer_stop(st->xfer[i]);
 		mtx_unlock(&sc->sc_lock);
 
 		/* Must be called without sc_lock held */
@@ -754,8 +806,8 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		mtx_lock(&sc->sc_lock);
 		sc->audio_active |= stream_bit;
 		st->running = 1;
-		usbd_transfer_start(st->xfer[0]);
-		usbd_transfer_start(st->xfer[1]);
+		for (int i = 0; i < LINE6_NCHANBUFS; i++)
+			usbd_transfer_start(st->xfer[i]);
 		mtx_unlock(&sc->sc_lock);
 		runtime->state = SNDRV_PCM_STATE_RUNNING;
 		return 0;
@@ -883,7 +935,16 @@ line6_bsd_attach(device_t dev)
 	sc->audio_active = 0;
 
 	if (info->capabilities & LINE6_CAP_INIT_TONEPORT) {
+		uint32_t ticks;
+		struct timespec ts;
+
 		device_printf(dev, "Initializing TonePort/POD Studio\n");
+
+		/* Sync time on device with host (Linux toneport_setup does this) */
+		getnanotime(&ts);
+		ticks = (uint32_t)ts.tv_sec;
+		line6_write_data(sc->usbdev, 0x80c6, &ticks, 4);
+
 		err = line6_send_cmd(sc->usbdev, 0x0301, 0x0000);
 		if (err != 0) {
 			device_printf(dev, "Initialization failed: %s\n",
