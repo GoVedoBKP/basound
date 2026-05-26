@@ -940,8 +940,8 @@ line6_bsd_attach(device_t dev)
 
 	mtx_init(&sc->sc_lock, "line6_lock", NULL, MTX_DEF);
 
-	device_printf(dev, "Attaching %s (USB %04x:%04x)\n",
-	    info->name, uaa->info.idVendor, uaa->info.idProduct);
+	device_printf(dev, "Attaching %s (USB %04x:%04x), Caps: 0x%x\n",
+	    info->name, uaa->info.idVendor, uaa->info.idProduct, sc->capabilities);
 
 	/*
 	 * POD Studio / TonePort: single USB interface (0) with multiple alt
@@ -953,7 +953,7 @@ line6_bsd_attach(device_t dev)
 	sc->audio_iface_index = sc->ctrl_iface_index; /* always iface 0 */
 	sc->audio_active = 0;
 
-	if (info->capabilities & LINE6_CAP_INIT_TONEPORT) {
+	if (sc->capabilities & LINE6_CAP_INIT_TONEPORT) {
 		uint32_t ticks;
 		struct timespec ts;
 		uint8_t fw_version;
