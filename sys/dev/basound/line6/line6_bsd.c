@@ -578,6 +578,23 @@ line6_write_data(struct usb_device *udev, uint16_t address, void *data, uint16_t
 	return (usbd_do_request(udev, NULL, &req, data));
 }
 
+/*
+ * Read data from a specific address on the Line6 device using vendor request 0x67.
+ */
+static usb_error_t
+line6_read_data(struct usb_device *udev, uint16_t address, void *data, uint16_t length)
+{
+	struct usb_device_request req;
+
+	req.bmRequestType = UT_READ_VENDOR_DEVICE;
+	req.bRequest = 0x67;
+	USETW(req.wValue, address);
+	USETW(req.wIndex, 0);
+	USETW(req.wLength, length);
+
+	return (usbd_do_request(udev, NULL, &req, data));
+}
+
 /* PCM callback stubs - implement basic audio stream handling */
 static int
 line6_pcm_open(struct snd_pcm_substream *substream)
@@ -733,6 +750,8 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		}
 
 		mtx_lock(&sc->sc_lock);
+		device_printf(sc->dev, "Trigger START: starting %d transfers\n",
+		    LINE6_NCHANBUFS);
 		sc->audio_active |= stream_bit;
 		st->frames_per_second = usbd_get_isoc_fps(sc->usbdev);
 		if (st->frames_per_second == 0)
@@ -937,8 +956,14 @@ line6_bsd_attach(device_t dev)
 	if (info->capabilities & LINE6_CAP_INIT_TONEPORT) {
 		uint32_t ticks;
 		struct timespec ts;
+		uint8_t fw_version;
 
 		device_printf(dev, "Initializing TonePort/POD Studio\n");
+
+		/* Read firmware version (matches Linux toneport_init) */
+		err = line6_read_data(sc->usbdev, 0x80c2, &fw_version, 1);
+		if (err == 0)
+			device_printf(dev, "Firmware version: %d\n", fw_version);
 
 		/* Sync time on device with host (Linux toneport_setup does this) */
 		getnanotime(&ts);
@@ -947,9 +972,10 @@ line6_bsd_attach(device_t dev)
 
 		err = line6_send_cmd(sc->usbdev, 0x0301, 0x0000);
 		if (err != 0) {
-			device_printf(dev, "Initialization failed: %s\n",
+			device_printf(dev, "Initialization (0x0301) failed: %s\n",
 			    usbd_errstr(err));
-			/* Continue anyway, some devices might already be initialized */
+		} else {
+			device_printf(dev, "Device enabled (0x0301 success)\n");
 		}
 	}
 
