@@ -104,8 +104,6 @@ basound_chan_setformat(kobj_t obj, void *data, uint32_t format)
 	struct snd_pcm_substream *substream = ch->substream;
 	const struct snd_pcm_ops *ops = substream->pstr->ops;
 
-	printf("basound: setformat 0x%08x -> ch=%u\n", format, AFMT_CHANNEL(format));
-
 	ch->format = format;
 	sndbuf_setfmt(ch->buffer, format);
 	if (substream->runtime != NULL) {
@@ -292,8 +290,6 @@ basound_chan_getmatrix(kobj_t obj, void *data, uint32_t format)
 	else
 		m = NULL;
 
-	printf("basound: getmatrix fmt=0x%08x ch=%u -> %s\n",
-	    format, channels, m ? "found" : "NULL");
 	return m;
 }
 
@@ -399,8 +395,6 @@ basound_pcm_attach(device_t dev)
 	 */
 	if (pcm->private_data != NULL) {
 		pcm_setflags(dev, pcm_getflags(dev) | SD_F_BITPERFECT);
-		printf("basound: bitperfect flags=0x%08x SD_F_BITPERFECT=%d\n",
-		    pcm_getflags(dev), !!(pcm_getflags(dev) & SD_F_BITPERFECT));
 	}
 
 	/*

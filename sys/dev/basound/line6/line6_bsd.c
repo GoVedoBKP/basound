@@ -400,7 +400,6 @@ line6_play_callback(struct usb_xfer *xfer, usb_error_t error)
 
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_SETUP:
-		device_printf(sc->dev, "Play Callback: SETUP\n");
 		/* FALLTHROUGH */
 	case USB_ST_TRANSFERRED:
 		if (!st->running || st->start == NULL || st->start == st->end)
@@ -514,7 +513,6 @@ line6_rec_callback(struct usb_xfer *xfer, usb_error_t error)
 		}
 		/* FALLTHROUGH to re-arm */
 	case USB_ST_SETUP:
-		device_printf(sc->dev, "Rec Callback: SETUP\n");
 tr_setup:
 		if (!st->running)
 			break;
@@ -753,8 +751,6 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		}
 
 		mtx_lock(&sc->sc_lock);
-		device_printf(sc->dev, "Trigger START: starting %d transfers\n",
-		    LINE6_NCHANBUFS);
 		sc->audio_active |= stream_bit;
 		st->frames_per_second = usbd_get_isoc_fps(sc->usbdev);
 		if (st->frames_per_second == 0)
