@@ -11,6 +11,10 @@
 
 MALLOC_DECLARE(M_ALSA);
 
+/* Forward declarations for static helpers used by the interrupt handler */
+static void hdsp_deinterleave_to_planar(struct hdsp *hdsp, int period_idx);
+static void hdsp_interleave_from_planar(struct hdsp *hdsp, int period_idx);
+
 /* RME HDSP PCI IDs */
 #define PCI_DEVICE_ID_RME_DIGIFACE	0x3fc5
 #define PCI_DEVICE_ID_RME_MULTIFACE	0x3fc6
@@ -194,6 +198,7 @@ snd_hdsp_interrupt(void *arg)
 	struct hdsp *hdsp = arg;
 	uint32_t status;
 	int audio, midi0, midi1;
+	int finished_period;
 
 	mtx_lock(&hdsp->lock);
 
@@ -216,6 +221,13 @@ snd_hdsp_interrupt(void *arg)
 	}
 
 	/*
+	 * HDSP_BufferID indicates which period the hardware is NOW using.
+	 * The period it just FINISHED (and that software must refill / read)
+	 * is the opposite one.
+	 */
+	finished_period = (status & HDSP_BufferID) ? 0 : 1;
+
+	/*
 	 * Release hdsp->lock BEFORE calling snd_pcm_period_elapsed.
 	 * snd_pcm_period_elapsed → chn_intr acquires CHN_LOCK.
 	 * basound_chan_trigger (called with CHN_LOCK held) acquires hdsp->lock.
@@ -225,10 +237,26 @@ snd_hdsp_interrupt(void *arg)
 	mtx_unlock(&hdsp->lock);
 
 	if (audio) {
+		/*
+		 * Capture: interleave the just-finished period from the planar
+		 * hardware buffer into sndbuf BEFORE snd_pcm_period_elapsed so
+		 * the PCM layer reads the correct captured data.
+		 */
+		if (hdsp->capture_substream)
+			hdsp_interleave_from_planar(hdsp, finished_period);
+
 		if (hdsp->capture_substream)
 			snd_pcm_period_elapsed(hdsp->capture_substream);
 		if (hdsp->playback_substream)
 			snd_pcm_period_elapsed(hdsp->playback_substream);
+
+		/*
+		 * Playback: deinterleave the just-refilled sndbuf period into
+		 * the planar DMA buffer AFTER snd_pcm_period_elapsed has had the
+		 * PCM layer write fresh audio into sndbuf[finished_period].
+		 */
+		if (hdsp->playback_substream)
+			hdsp_deinterleave_to_planar(hdsp, finished_period);
 	}
 
 	if (midi0 || midi1)
@@ -359,6 +387,212 @@ hdsp_init_mixer(struct hdsp *hdsp)
 	return 0;
 }
 
+/* -----------------------------------------------------------------------
+ * Planar DMA buffer allocation / deallocation
+ * -----------------------------------------------------------------------
+ *
+ * The HDSP hardware uses a non-interleaved (planar) DMA layout:
+ *   channel N's data starts at outputBufferAddress + N * HDSP_CHANNEL_BUFFER_BYTES
+ * The FreeBSD PCM layer uses an interleaved ring buffer (sndbuf).
+ * These helpers allocate the hardware-facing planar buffers and provide
+ * the routines that convert between the two layouts at each period boundary.
+ */
+
+static void
+hdsp_dma_cb(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+{
+	if (error == 0)
+		*(bus_addr_t *)arg = segs[0].ds_addr;
+}
+
+static int
+hdsp_alloc_one_dma_buf(struct hdsp *hdsp, struct snd_dma_buffer *dmab,
+    unsigned char **buf_ptr, size_t bufsz, const char *what)
+{
+	int err;
+
+	bzero(dmab, sizeof(*dmab));
+	dmab->bytes = bufsz;
+
+	/*
+	 * Use the PCI device's parent DMA tag with 32-bit address constraint
+	 * (HDSP is an old 32-bit PCI card) and 64 KB alignment to match the
+	 * card-level DMA tag created in alsa_card.c.
+	 */
+	err = bus_dma_tag_create(
+	    bus_get_dma_tag(hdsp->pci->bsddev),	/* parent */
+	    0x10000, 0,				/* 64 KB alignment, no boundary */
+	    BUS_SPACE_MAXADDR_32BIT,		/* 32-bit addressing */
+	    BUS_SPACE_MAXADDR,
+	    NULL, NULL,
+	    bufsz, 1, bufsz,
+	    0, NULL, NULL,
+	    &dmab->tag);
+	if (err != 0) {
+		dev_err(hdsp->card->dev, "can't create %s planar DMA tag\n", what);
+		return -ENOMEM;
+	}
+
+	err = bus_dmamem_alloc(dmab->tag, &dmab->area,
+	    BUS_DMA_WAITOK | BUS_DMA_ZERO, &dmab->map);
+	if (err != 0) {
+		dev_err(hdsp->card->dev, "can't alloc %s planar DMA memory\n", what);
+		bus_dma_tag_destroy(dmab->tag);
+		dmab->tag = NULL;
+		return -ENOMEM;
+	}
+
+	err = bus_dmamap_load(dmab->tag, dmab->map, dmab->area, bufsz,
+	    hdsp_dma_cb, &dmab->addr, BUS_DMA_NOWAIT);
+	if (err != 0) {
+		dev_err(hdsp->card->dev, "can't load %s planar DMA map\n", what);
+		bus_dmamem_free(dmab->tag, dmab->area, dmab->map);
+		bus_dma_tag_destroy(dmab->tag);
+		dmab->tag = NULL;
+		return -ENOMEM;
+	}
+
+	*buf_ptr = dmab->area;
+	return 0;
+}
+
+int
+hdsp_alloc_dma_buffers(struct hdsp *hdsp)
+{
+	size_t bufsz = (size_t)hdsp->max_channels * HDSP_CHANNEL_BUFFER_BYTES;
+	int err;
+
+	err = hdsp_alloc_one_dma_buf(hdsp, &hdsp->playback_dma_buf,
+	    &hdsp->playback_buffer, bufsz, "playback");
+	if (err)
+		return err;
+
+	err = hdsp_alloc_one_dma_buf(hdsp, &hdsp->capture_dma_buf,
+	    &hdsp->capture_buffer, bufsz, "capture");
+	if (err) {
+		snd_dma_free_pages(&hdsp->playback_dma_buf);
+		hdsp->playback_buffer = NULL;
+		return err;
+	}
+
+	dev_info(hdsp->card->dev,
+	    "planar DMA buffers: %zu bytes/dir, play=0x%08jx cap=0x%08jx\n",
+	    bufsz,
+	    (uintmax_t)hdsp->playback_dma_buf.addr,
+	    (uintmax_t)hdsp->capture_dma_buf.addr);
+	return 0;
+}
+
+void
+hdsp_free_dma_buffers(struct hdsp *hdsp)
+{
+	if (hdsp->playback_dma_buf.tag != NULL) {
+		snd_dma_free_pages(&hdsp->playback_dma_buf);
+		hdsp->playback_buffer = NULL;
+	}
+	if (hdsp->capture_dma_buf.tag != NULL) {
+		snd_dma_free_pages(&hdsp->capture_dma_buf);
+		hdsp->capture_buffer = NULL;
+	}
+}
+
+/*
+ * hdsp_deinterleave_to_planar — copy one period from the interleaved sndbuf
+ * staging buffer into the hardware's non-interleaved (planar) playback DMA
+ * buffer.
+ *
+ * Interleaved sndbuf layout (nch channels, S32_LE):
+ *   word[period * period_frames * nch + frame * nch + ch]
+ *
+ * Planar hardware layout:
+ *   channel ch starts at word offset ch * (HDSP_CHANNEL_BUFFER_BYTES / 4)
+ *   word[ch * ch_buf_words + period * period_frames + frame]
+ *
+ * Called at TRIGGER_START (pre-fill both periods) and from the interrupt
+ * handler after snd_pcm_period_elapsed has refilled the finished period.
+ */
+static void
+hdsp_deinterleave_to_planar(struct hdsp *hdsp, int period_idx)
+{
+	struct basound_chan *ch;
+	const uint32_t *src;
+	uint32_t *dst;
+	uint32_t nch, period_frames, ch_buf_words, fr, c;
+	uint32_t src_off, dst_off;
+
+	if (hdsp->playback_substream == NULL ||
+	    hdsp->playback_substream->runtime == NULL ||
+	    hdsp->playback_substream->runtime->period_bytes == 0 ||
+	    hdsp->playback_buffer == NULL)
+		return;
+
+	ch = hdsp->playback_substream->private_data;
+	if (ch == NULL || ch->buffer == NULL)
+		return;
+
+	nch = hdsp->ss_out_channels;
+	period_frames = hdsp->playback_substream->runtime->period_bytes / (nch * 4);
+	if (period_frames == 0)
+		return;
+
+	ch_buf_words = HDSP_CHANNEL_BUFFER_BYTES / 4;
+	src = (const uint32_t *)sndbuf_getbuf(ch->buffer);
+	dst = (uint32_t *)hdsp->playback_buffer;
+
+	src_off = period_idx * period_frames * nch;
+	dst_off = period_idx * period_frames;
+
+	for (fr = 0; fr < period_frames; fr++)
+		for (c = 0; c < nch; c++)
+			dst[c * ch_buf_words + dst_off + fr] =
+			    src[src_off + fr * nch + c];
+}
+
+/*
+ * hdsp_interleave_from_planar — copy one captured period from the hardware's
+ * non-interleaved (planar) capture DMA buffer into the interleaved sndbuf so
+ * the PCM layer can read freshly captured data.
+ *
+ * Called from the interrupt handler BEFORE snd_pcm_period_elapsed so the
+ * PCM layer sees the correct capture data when it advances the read pointer.
+ */
+static void
+hdsp_interleave_from_planar(struct hdsp *hdsp, int period_idx)
+{
+	struct basound_chan *ch;
+	const uint32_t *src;
+	uint32_t *dst;
+	uint32_t nch, period_frames, ch_buf_words, fr, c;
+	uint32_t src_off, dst_off;
+
+	if (hdsp->capture_substream == NULL ||
+	    hdsp->capture_substream->runtime == NULL ||
+	    hdsp->capture_substream->runtime->period_bytes == 0 ||
+	    hdsp->capture_buffer == NULL)
+		return;
+
+	ch = hdsp->capture_substream->private_data;
+	if (ch == NULL || ch->buffer == NULL)
+		return;
+
+	nch = hdsp->ss_in_channels;
+	period_frames = hdsp->capture_substream->runtime->period_bytes / (nch * 4);
+	if (period_frames == 0)
+		return;
+
+	ch_buf_words = HDSP_CHANNEL_BUFFER_BYTES / 4;
+	src = (const uint32_t *)hdsp->capture_buffer;
+	dst = (uint32_t *)sndbuf_getbuf(ch->buffer);
+
+	src_off = period_idx * period_frames;
+	dst_off = period_idx * period_frames * nch;
+
+	for (fr = 0; fr < period_frames; fr++)
+		for (c = 0; c < nch; c++)
+			dst[dst_off + fr * nch + c] =
+			    src[c * ch_buf_words + src_off + fr];
+}
+
 int
 snd_hdsp_upload_firmware(struct hdsp *hdsp)
 {
@@ -454,6 +688,15 @@ snd_hdsp_upload_firmware(struct hdsp *hdsp)
 		return -EIO;
 	}
 
+	/* Allocate per-channel planar DMA buffers that the hardware reads
+	 * and writes directly.  The sndbuf ring buffer (used by the FreeBSD
+	 * PCM layer) holds interleaved data; the interrupt handler converts
+	 * between the two layouts at each period boundary. */
+	if (hdsp_alloc_dma_buffers(hdsp) < 0) {
+		dev_err(hdsp->card->dev, "failed to allocate planar DMA buffers\n");
+		return -ENOMEM;
+	}
+
 	return 0;
 }
 
@@ -541,21 +784,28 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 	case SNDRV_PCM_TRIGGER_START:
 		/* Start HDSP hardware streaming */
 		if (hdsp->running == 0) {
-			/* Program DMA buffer addresses from substream runtimes.
-			 * These are populated by basound_chan_init via sndbuf_alloc. */
-			if (hdsp->playback_substream != NULL &&
-			    hdsp->playback_substream->runtime != NULL &&
-			    hdsp->playback_substream->runtime->dma_bytes > 0) {
-				hdsp_write(hdsp, HDSP_outputBufferAddress,
-					   (uint32_t)hdsp->playback_substream->runtime->dma_addr);
+			/*
+			 * Program hardware DMA with the planar (non-interleaved)
+			 * buffer addresses.  The sndbuf ring buffer is used by the
+			 * PCM layer for interleaved staging; the interrupt handler
+			 * converts between the two layouts at each period boundary.
+			 */
+			hdsp_write(hdsp, HDSP_outputBufferAddress,
+			    (uint32_t)hdsp->playback_dma_buf.addr);
+			hdsp_write(hdsp, HDSP_inputBufferAddress,
+			    (uint32_t)hdsp->capture_dma_buf.addr);
+
+			/*
+			 * Pre-fill the planar playback buffer from the sndbuf that
+			 * the PCM layer has already populated before calling trigger.
+			 * Both periods must be ready before the hardware starts so
+			 * the very first DMA transfer carries valid audio.
+			 */
+			if (stream_dir == SNDRV_PCM_STREAM_PLAYBACK) {
+				hdsp_deinterleave_to_planar(hdsp, 0);
+				hdsp_deinterleave_to_planar(hdsp, 1);
 			}
-			if (hdsp->capture_substream != NULL &&
-			    hdsp->capture_substream->runtime != NULL &&
-			    hdsp->capture_substream->runtime->dma_bytes > 0) {
-				hdsp_write(hdsp, HDSP_inputBufferAddress,
-					   (uint32_t)hdsp->capture_substream->runtime->dma_addr);
-			}
-			
+
 			/* Enable audio interrupts and start DMA engine using
 			 * the cached control register so no previously
 			 * configured bits (e.g. ClockModeMaster, DDS rate)
@@ -571,6 +821,17 @@ snd_hdsp_trigger(struct snd_pcm_substream *substream, int cmd)
 			
 			/* Set stream as running */
 			hdsp->running = 1;
+		} else if (stream_dir == SNDRV_PCM_STREAM_PLAYBACK) {
+			/*
+			 * Hardware already running (capture-first full-duplex):
+			 * pre-fill the planar buffer so the next period boundary
+			 * picks up valid audio instead of stale zeros.
+			 */
+			hdsp_deinterleave_to_planar(hdsp, 0);
+			hdsp_deinterleave_to_planar(hdsp, 1);
+			audio_stream_start(stream);
+		} else {
+			audio_stream_start(stream);
 		}
 		mtx_unlock(&hdsp->lock);
 		return 0;

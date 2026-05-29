@@ -163,23 +163,22 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 	}
 
 	/*
-	 * Size the ring buffer generously to absorb USB timing jitter.
+	 * HDSP uses a hardware double-buffer (exactly 2 periods): HDSP_BufferID
+	 * only ever reports position 0 or period_bytes.  Using blkcnt > 2 causes
+	 * the PCM layer's write pointer to drift ahead of the hardware read
+	 * pointer, eventually filling all blocks and stopping writes → silence.
 	 *
-	 * USB isochronous audio delivers data in fixed-size bursts
-	 * (LINE6: 8 ISO frames × 192 bytes = 1536 bytes per transfer)
-	 * with two transfers in flight simultaneously.  At startup,
-	 * both transfers are submitted before the first chn_intr fires,
-	 * consuming 3072 bytes immediately.  If the ring is only 4096
-	 * bytes (blkcnt=2 × blocksize=2048), that leaves just 1024 bytes
-	 * of margin — any scheduling jitter causes an xrun.
-	 *
-	 * Target at least 32 KB so there is always several USB transfers
-	 * worth of headroom.  For HDSP (PCI DMA) this just pre-allocates
-	 * a slightly larger DMA region, which is harmless.
+	 * For non-HDSP devices (e.g. USB audio) keep a larger ring to absorb
+	 * ISO transfer jitter.
 	 */
-	uint32_t blkcnt = 32768 / blocksize;
-	if (blkcnt < 4)
-		blkcnt = 4;
+	uint32_t blkcnt;
+	if (ch->substream->pcm->private_data != NULL) {
+		blkcnt = 2;
+	} else {
+		blkcnt = 32768 / blocksize;
+		if (blkcnt < 4)
+			blkcnt = 4;
+	}
 	sndbuf_resize(ch->buffer, blkcnt, blocksize);
 
 	/* Keep runtime in sync with the logical buffer size so that

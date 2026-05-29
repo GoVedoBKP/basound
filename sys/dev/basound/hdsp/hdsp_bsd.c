@@ -156,6 +156,9 @@ hdsp_bsd_detach(device_t dev)
 
 	hdsp_cdev_destroy(&sc->chip);
 
+	/* Free planar DMA buffers before tearing down the card and PCI resources. */
+	hdsp_free_dma_buffers(&sc->chip);
+
 	if (sc->chip.card) {
 		snd_card_free(sc->chip.card);
 	}

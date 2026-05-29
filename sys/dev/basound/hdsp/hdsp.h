@@ -146,6 +146,13 @@ struct hdsp {
 #define hdsp_encode_latency(x)  (((x)<<1) & HDSP_LatencyMask)
 #define hdsp_decode_latency(x)  (((x) & HDSP_LatencyMask) >> 1)
 
+/*
+ * Per-channel planar DMA buffer size.
+ * Supports double-buffering at the maximum hardware period (latency=7 → 8192 frames):
+ *   8192 frames × 4 bytes/sample × 2 periods = 65536 bytes per channel.
+ */
+#define HDSP_CHANNEL_BUFFER_BYTES   (8192 * 4 * 2)
+
 #define HDSP_DllError (1<<21)
 #define HDSP_PROGRAM	        0x020
 #define HDSP_CONFIG_MODE_0	0x040
@@ -204,6 +211,10 @@ static inline int hdsp_input_to_output_key(struct hdsp *hdsp, int in, int out)
 	else
 		return (52 * out) + in;
 }
+
+/* Planar DMA buffer management — called from hdsp_bsd.c */
+int  hdsp_alloc_dma_buffers(struct hdsp *hdsp);
+void hdsp_free_dma_buffers(struct hdsp *hdsp);
 
 /* Internal functions to be ported */
 int snd_hdsp_create(struct snd_card *card, struct hdsp *hdsp);
