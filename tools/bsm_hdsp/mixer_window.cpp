@@ -12,10 +12,19 @@
 /* Layout constants */
 static constexpr int kMenuH    = 25;
 static constexpr int kStatH    = 20;
-static constexpr int kFaderW   = 120;  /* right panel width */
-static constexpr int kMeterW   = 40;   /* per-channel VU width */
-static constexpr int kMeterH   = 200;  /* VU meter height */
+static constexpr int kFaderW   = 120;  /* matrix tab right panel width */
+static constexpr int kMeterW   = 40;   /* per-channel VU width (Meters tab) */
+static constexpr int kMeterH   = 200;  /* VU meter height (Meters tab) */
 static constexpr double kTimerInterval = 0.04; /* 25 Hz */
+
+/* Mixer tab channel strip constants */
+static constexpr int kStripW  = 60;   /* channel strip total width */
+static constexpr int kSLabelH = 14;   /* channel number label height */
+static constexpr int kSVuW    = 22;   /* VU meter width (left side of slot) */
+static constexpr int kSSlotH  = 100;  /* VU + fader slot height (same for both) */
+static constexpr int kSDbH    = 14;   /* dB readout height below slot */
+static constexpr int kSHdrH   = 22;   /* section header height */
+static constexpr int kSGapH   = 20;   /* vertical gap between sections */
 
 /* ------------------------------------------------------------------ */
 /* Construction                                                         */
@@ -25,9 +34,10 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
     : Fl_Double_Window(win_w, win_h, title),
       connected_(false),
       menu_(nullptr), tabs_(nullptr),
+      tab_mixer_(nullptr), mix_scroll_(nullptr), mix_content_(nullptr),
       tab_matrix_(nullptr), matrix_(nullptr),
       cell_fader_(nullptr), cell_label_(nullptr), cell_db_(nullptr),
-      tab_meters_(nullptr), meter_scroll_(nullptr),
+      tab_meters_(nullptr), meter_scroll_(nullptr), meter_content_(nullptr),
       status_bar_(nullptr),
       selected_addr_(0)
 {
@@ -48,9 +58,25 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 	{
 		int tw = win_w, th = body_h - 25, ty = kMenuH + 25;
 
+		/* --- Mixer tab (main) --- */
+		tab_mixer_ = new Fl_Group(0, kMenuH, win_w, body_h, "  Mixer  ");
+		tab_mixer_->color(fl_rgb_color(35, 35, 35));
+		tab_mixer_->labelcolor(FL_WHITE);
+		tab_mixer_->begin();
+		{
+			mix_scroll_ = new Fl_Scroll(0, ty, tw, th);
+			mix_scroll_->type(Fl_Scroll::BOTH);
+			mix_scroll_->color(fl_rgb_color(30, 30, 30));
+			mix_scroll_->begin();
+			mix_scroll_->end();
+		}
+		tab_mixer_->resizable(mix_scroll_);
+		tab_mixer_->end();
+
 		/* --- Matrix tab --- */
 		tab_matrix_ = new Fl_Group(0, kMenuH, win_w, body_h, "  Matrix  ");
 		tab_matrix_->color(fl_rgb_color(35, 35, 35));
+		tab_matrix_->labelcolor(FL_WHITE);
 		tab_matrix_->begin();
 		{
 			int mx_w = tw - kFaderW;
@@ -77,8 +103,8 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 
 				cell_fader_ = new Fl_Slider(px, py, pw, th - 120);
 				cell_fader_->type(FL_VERT_NICE_SLIDER);
-				cell_fader_->bounds(0.0, 1.0);
-				cell_fader_->value(0.0);
+					cell_fader_->bounds(1.0, 0.0);  /* top=1.0=unity, bottom=0.0=silence */
+					cell_fader_->value(1.0);
 				cell_fader_->color(fl_rgb_color(60, 60, 60));
 				cell_fader_->selection_color(fl_rgb_color(80, 160, 80));
 				cell_fader_->callback(fader_cb, this);
@@ -96,6 +122,7 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 		/* --- Meters tab --- */
 		tab_meters_ = new Fl_Group(0, kMenuH, win_w, body_h, "  Meters  ");
 		tab_meters_->color(fl_rgb_color(35, 35, 35));
+		tab_meters_->labelcolor(FL_WHITE);
 		tab_meters_->begin();
 		{
 			meter_scroll_ = new Fl_Scroll(0, ty, tw, th);
@@ -104,6 +131,7 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 			/* VU meters populated in build_ui() */
 			meter_scroll_->end();
 		}
+		tab_meters_->resizable(meter_scroll_);
 		tab_meters_->end();
 	}
 
@@ -119,6 +147,7 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 
 	end();
 	resizable(tabs_);
+	size_range(640, 480);
 
 	build_device_menu();
 }
@@ -212,6 +241,7 @@ void MixerWindow::connect(const char *path) {
 }
 
 void MixerWindow::disconnect() {
+	clear_mix_strips();
 	clear_meters();
 	if (matrix_) matrix_->init(0, nullptr);
 	dev_.close();
@@ -234,13 +264,39 @@ void MixerWindow::build_ui() {
 
 	matrix_->init(nch, mx.matrix);
 
-	/* Populate meter strips */
-	clear_meters();
+	/* ----- Mixer tab -------------------------------------------------- */
+	clear_mix_strips();
+	int mx0 = mix_scroll_->x() + 4;
+	int y_cur = mix_scroll_->y() + 4;
 
-	meter_scroll_->begin();
+	mix_scroll_->begin();
+	int content_w = std::max(mix_scroll_->w(), (nch + 2) * kStripW + 8);
+	mix_content_ = new Fl_Group(mix_scroll_->x(), mix_scroll_->y(),
+	    content_w, 4000);
+	mix_content_->begin();
+
+	build_mix_section("PCM Outputs (playback)", nch,     0, mix_pcm_,
+	    mx0, content_w, y_cur, fl_rgb_color(80, 160, 80));
+	build_mix_section("Physical Inputs",         nch,     1, mix_in_,
+	    mx0, content_w, y_cur, fl_rgb_color(180, 130, 60));
+	build_mix_section("Physical Outputs",        nch + 2, 2, mix_out_,
+	    mx0, content_w, y_cur, fl_rgb_color(80, 120, 200));
+
+	mix_content_->size(mix_content_->w(), y_cur - mix_content_->y() + 4);
+	mix_content_->end();
+	mix_scroll_->end();
+	mix_scroll_->redraw();
+
+	/* ----- Meters tab ------------------------------------------------- */
+	clear_meters();
 
 	int my = meter_scroll_->y() + 5;
 	int mx_x = meter_scroll_->x() + 5;
+
+	meter_scroll_->begin();
+	meter_content_ = new Fl_Group(meter_scroll_->x(), meter_scroll_->y(),
+	    meter_scroll_->w(), 4000);
+	meter_content_->begin();
 
 	auto add_section = [&](const char *title, int count,
 	    std::vector<VuMeter *> &vec, Fl_Color lbl_col)
@@ -267,10 +323,8 @@ void MixerWindow::build_ui() {
 	add_section("Playback (DAW out)", nch, vu_pb_,  fl_rgb_color(80, 160, 80));
 	add_section("Hardware Outputs",   nch + 2, vu_out_, fl_rgb_color(80, 120, 200));
 
-	/* Extend scroll canvas */
-	Fl_Box *spacer = new Fl_Box(mx_x, my, 1, 1);
-	(void)spacer;
-
+	meter_content_->size(meter_content_->w(), my - meter_content_->y() + 4);
+	meter_content_->end();
 	meter_scroll_->end();
 	meter_scroll_->redraw();
 }
@@ -279,8 +333,26 @@ void MixerWindow::clear_meters() {
 	vu_in_.clear();
 	vu_pb_.clear();
 	vu_out_.clear();
-	/* Remove all children from the scroll */
-	meter_scroll_->clear();
+	if (meter_content_) {
+		meter_scroll_->remove(*meter_content_);  /* 3->2 children, safe */
+		delete meter_content_;
+		meter_content_ = nullptr;
+	}
+}
+
+void MixerWindow::clear_mix_strips() {
+	/* Delete strip descriptors; widget memory owned by mix_content_ */
+	for (auto *s : mix_pcm_) delete s;
+	for (auto *s : mix_in_)  delete s;
+	for (auto *s : mix_out_) delete s;
+	mix_pcm_.clear();
+	mix_in_.clear();
+	mix_out_.clear();
+	if (mix_content_) {
+		mix_scroll_->remove(*mix_content_);  /* 3->2 children, safe */
+		delete mix_content_;
+		mix_content_ = nullptr;
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -301,6 +373,7 @@ void MixerWindow::update_meters() {
 
 	int nch = dev_.config().max_channels;
 
+	/* Meters tab VU strips */
 	for (int i = 0; i < nch && i < (int)vu_in_.size(); ++i) {
 		vu_in_[i]->set_peak_raw(lev.input_peaks[i]);
 		vu_in_[i]->tick();
@@ -314,9 +387,26 @@ void MixerWindow::update_meters() {
 		vu_out_[i]->tick();
 	}
 
-	/* Only repaint the meters scroll if it is the active tab */
-	if (tabs_->value() == tab_meters_)
+	/* Mixer tab VU strips */
+	for (int i = 0; i < nch && i < (int)mix_pcm_.size(); ++i) {
+		mix_pcm_[i]->vu->set_peak_raw(lev.playback_peaks[i]);
+		mix_pcm_[i]->vu->tick();
+	}
+	for (int i = 0; i < nch && i < (int)mix_in_.size(); ++i) {
+		mix_in_[i]->vu->set_peak_raw(lev.input_peaks[i]);
+		mix_in_[i]->vu->tick();
+	}
+	for (int i = 0; i < nch + 2 && i < (int)mix_out_.size(); ++i) {
+		mix_out_[i]->vu->set_peak_raw(lev.output_peaks[i]);
+		mix_out_[i]->vu->tick();
+	}
+
+	/* Only repaint the active tab */
+	Fl_Group *active = static_cast<Fl_Group *>(tabs_->value());
+	if (active == tab_meters_)
 		meter_scroll_->redraw();
+	else if (active == tab_mixer_)
+		mix_scroll_->redraw();
 }
 
 /* ------------------------------------------------------------------ */
@@ -391,6 +481,127 @@ void MixerWindow::on_fader_moved() {
 		snprintf(buf, sizeof(buf), "%.1f dB", db);
 	}
 	cell_db_->copy_label(buf);
+}
+
+/* ------------------------------------------------------------------ */
+/* Mixer tab: channel strip builder                                     */
+/* ------------------------------------------------------------------ */
+
+void MixerWindow::build_mix_section(
+    const char *title, int count, int addr_type,
+    std::vector<MixerStrip *> &vec,
+    int x0, int hdr_w, int &y_cur, Fl_Color lbl_col)
+{
+	/* Section header: full-width colored band with title */
+	Fl_Box *hdr = new Fl_Box(FL_FLAT_BOX, x0, y_cur, hdr_w, kSHdrH, title);
+	hdr->color(fl_color_average(lbl_col, FL_BLACK, 0.45f));
+	hdr->labelcolor(FL_WHITE);
+	hdr->labelfont(FL_HELVETICA_BOLD);
+	hdr->labelsize(11);
+	hdr->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+	y_cur += kSHdrH;
+
+const int fader_w = kStripW - kSVuW - 6;  /* 60-22-6 = 32 */
+
+	for (int i = 0; i < count; ++i) {
+		int sx = x0 + i * kStripW;
+		int sy = y_cur;
+
+		/* Resolve matrix address for this strip */
+		int addr = -1;
+		if (addr_type == 0)
+			addr = (int)HDSP_PLAYBACK_ADDR(i, i);
+		else if (addr_type == 1)
+			addr = (int)HDSP_CAPTURE_ADDR(i, i);
+		/* addr_type == 2: physical output — read-only, addr stays -1 */
+
+		MixerStrip *s = new MixerStrip{nullptr, nullptr, nullptr, addr, this};
+
+		/* Channel number label */
+		char lbl[8];
+		snprintf(lbl, sizeof(lbl), "%d", i + 1);
+		Fl_Box *ch_lbl = new Fl_Box(sx, sy, kStripW, kSLabelH);
+		ch_lbl->copy_label(lbl);
+		ch_lbl->labelcolor(FL_WHITE);
+		ch_lbl->labelsize(9);
+		sy += kSLabelH;
+
+		/* VU meter */
+s->vu = new VuMeter(sx, sy, kSVuW, kSSlotH);
+
+
+/* VU (left) and fader (right), same height */
+int fx = sx + kSVuW + 4;
+s->fader = new Fl_Slider(fx, sy, fader_w, kSSlotH);
+		s->fader->type(FL_VERT_NICE_SLIDER);
+s->fader->bounds(1.0, 0.0);  /* top=1.0=unity, bottom=0.0=silence */
+
+		if (addr >= 0) {
+			double init = (double)matrix_->get_gain((uint32_t)addr)
+			    / HDSP_GAIN_UNITY;
+			s->fader->value(init);
+			s->fader->color(fl_rgb_color(60, 60, 60));
+			s->fader->selection_color(fl_rgb_color(80, 160, 80));
+			s->fader->callback(mix_fader_cb, s);
+		} else {
+			s->fader->value(0.0);
+			s->fader->color(fl_rgb_color(38, 38, 38));
+			s->fader->selection_color(fl_rgb_color(50, 50, 55));
+			s->fader->deactivate();
+		}
+
+
+		/* dB readout */
+s->db_label = new Fl_Box(sx, sy + kSSlotH, kStripW, kSDbH);
+		s->db_label->labelcolor(fl_rgb_color(150, 150, 150));
+		s->db_label->labelsize(8);
+		if (addr >= 0) {
+			uint16_t gain = matrix_->get_gain((uint32_t)addr);
+			char buf[16];
+			if (gain == 0)
+				snprintf(buf, sizeof(buf), "-inf");
+			else {
+				float db = 20.0f * log10f((float)gain / HDSP_GAIN_UNITY);
+				snprintf(buf, sizeof(buf), "%.0f", db);
+			}
+			s->db_label->copy_label(buf);
+		} else {
+			s->db_label->copy_label("---");
+			s->db_label->labelcolor(fl_rgb_color(80, 80, 80));
+		}
+
+		vec.push_back(s);
+	}
+
+y_cur += kSLabelH + kSSlotH + kSDbH + kSGapH;
+}
+
+/* ------------------------------------------------------------------ */
+/* Mixer tab: strip fader callbacks                                     */
+/* ------------------------------------------------------------------ */
+
+void MixerWindow::mix_fader_cb(Fl_Widget *, void *data) {
+	auto *s = static_cast<MixerStrip *>(data);
+	s->win->on_mix_fader_moved(s);
+}
+
+void MixerWindow::on_mix_fader_moved(MixerStrip *s) {
+	if (!connected_ || s->matrix_addr < 0) return;
+
+	double frac = s->fader->value();
+	auto gain = (uint16_t)(frac * HDSP_GAIN_UNITY);
+
+	dev_.set_entry((uint32_t)s->matrix_addr, gain);
+	matrix_->set_gain((uint32_t)s->matrix_addr, gain);
+
+	char buf[16];
+	if (gain == 0)
+		snprintf(buf, sizeof(buf), "-inf");
+	else {
+		float db = 20.0f * log10f((float)gain / HDSP_GAIN_UNITY);
+		snprintf(buf, sizeof(buf), "%.0f", db);
+	}
+	s->db_label->copy_label(buf);
 }
 
 /* ------------------------------------------------------------------ */

@@ -20,6 +20,8 @@
  *
  * Tabs
  * ----
+ *   "Mixer"   — channel strips (VU meter + fader) for PCM outputs,
+ *               physical inputs and physical outputs
  *   "Matrix"  — heat-map gain matrix + selected-cell fader panel
  *   "Meters"  — VU meter strips for all inputs, playbacks, outputs
  *
@@ -28,6 +30,19 @@
  *   Device > (scanned device list)
  *   File   > Load Config / Save Config / Quit
  */
+
+/* Forward declaration needed by MixerStrip. */
+class MixerWindow;
+
+/* Per-channel strip descriptor used in the Mixer tab. */
+struct MixerStrip {
+	VuMeter     *vu;          /* level meter */
+	Fl_Slider   *fader;       /* gain fader */
+	Fl_Box      *db_label;    /* dB readout below fader */
+	int          matrix_addr; /* matrix gain address, or -1 for read-only */
+	MixerWindow *win;         /* back-pointer for the fader callback */
+};
+
 class MixerWindow : public Fl_Double_Window {
 public:
 	MixerWindow(int w, int h, const char *title = "bsm_hdsp");
@@ -48,6 +63,14 @@ private:
 	Fl_Menu_Bar   *menu_;
 	Fl_Tabs       *tabs_;
 
+	/* Mixer tab (main) */
+	Fl_Group  *tab_mixer_;
+	Fl_Scroll *mix_scroll_;
+	Fl_Group  *mix_content_;              /* content wrapper inside mix_scroll_ */
+	std::vector<MixerStrip *> mix_pcm_;   /* PCM / playback strips */
+	std::vector<MixerStrip *> mix_in_;    /* physical input strips */
+	std::vector<MixerStrip *> mix_out_;   /* physical output strips */
+
 	/* Matrix tab */
 	Fl_Group      *tab_matrix_;
 	MatrixWidget  *matrix_;
@@ -58,6 +81,7 @@ private:
 	/* Meters tab */
 	Fl_Group      *tab_meters_;
 	Fl_Scroll     *meter_scroll_;
+	Fl_Group      *meter_content_;        /* content wrapper inside meter_scroll_ */
 	std::vector<VuMeter *> vu_in_;
 	std::vector<VuMeter *> vu_pb_;
 	std::vector<VuMeter *> vu_out_;
@@ -68,6 +92,13 @@ private:
 	/* Build/destroy the card-specific UI elements */
 	void build_ui();
 	void clear_meters();
+	void clear_mix_strips();
+
+	/* Build one section (header + channel strips) in the Mixer tab.
+	 * addr_type: 0=playback diagonal, 1=capture diagonal, 2=read-only */
+	void build_mix_section(const char *title, int count, int addr_type,
+	    std::vector<MixerStrip *> &vec,
+	    int x0, int hdr_w, int &y_cur, Fl_Color col);
 
 	/* Timer callback (25 Hz meter updates) */
 	static void timer_cb(void *userdata);
@@ -79,10 +110,14 @@ private:
 	void load_config();
 	void save_config();
 
-	/* Cell fader callback */
+	/* Matrix cell fader callback */
 	static void fader_cb(Fl_Widget *w, void *data);
 	void        on_cell_selected(uint32_t addr, uint16_t gain);
 	void        on_fader_moved();
+
+	/* Mixer tab strip fader callback */
+	static void mix_fader_cb(Fl_Widget *w, void *data);
+	void        on_mix_fader_moved(MixerStrip *s);
 
 	uint32_t selected_addr_;
 
