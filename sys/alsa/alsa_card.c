@@ -61,6 +61,8 @@ snd_card_new(struct device *parent, int idx, const char *xid,
 int
 snd_card_free(struct snd_card *card)
 {
+	struct snd_kcontrol *kctl, *kctl_tmp;
+
 	if (card == NULL)
 		return 0;
 
@@ -70,6 +72,12 @@ snd_card_free(struct snd_card *card)
 		device_t parent = device_get_parent(card->pcm_dev);
 		device_delete_child(parent, card->pcm_dev);
 		card->pcm_dev = NULL;
+	}
+
+	/* Clean up controls */
+	STAILQ_FOREACH_SAFE(kctl, &card->ctl_list, next_ctl, kctl_tmp) {
+		STAILQ_REMOVE(&card->ctl_list, kctl, snd_kcontrol, next_ctl);
+		free(kctl, M_ALSA);
 	}
 
 	if (card->dmatag != NULL) {

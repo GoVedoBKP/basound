@@ -30,8 +30,34 @@ static int
 basound_mixer_set(struct snd_mixer *m, unsigned dev, unsigned left, unsigned right)
 {
 	struct snd_card *card = mix_getdevinfo(m);
-	
+	struct snd_kcontrol *kctl;
+	struct snd_ctl_elem_value ucontrol;
+	const char *target_name = NULL;
+
 	dev_dbg(card->dev, "Mixer set: dev=%u left=%u right=%u\n", dev, left, right);
+
+	if (dev == SOUND_MIXER_VOLUME)
+		target_name = "Monitor Playback Volume";
+	else if (dev == SOUND_MIXER_PCM)
+		target_name = "PCM Playback Volume";
+
+	if (target_name == NULL)
+		return -1;
+
+	STAILQ_FOREACH(kctl, &card->ctl_list, next_ctl) {
+		if (strcmp(kctl->name, target_name) == 0) {
+			if (kctl->put) {
+				bzero(&ucontrol, sizeof(ucontrol));
+				/* Scale 0-100 to ALSA 0-255 if needed, but Line6 
+				 * shim expects 0-255 in its controls. FreeBSD mixer 
+				 * left/right are 0-100. */
+				ucontrol.value.integer.value[0] = (left * 255) / 100;
+				ucontrol.value.integer.value[1] = (right * 255) / 100;
+				kctl->put(kctl, &ucontrol);
+			}
+			return left | (right << 8);
+		}
+	}
 	
 	return left | (right << 8);
 }

@@ -24,7 +24,7 @@ snd_hdsp_get_mixer(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *uco
 	int addr = 0; /* Full address calculation requires porting more helpers */
 
 	mtx_lock(&hdsp->lock);
-	ucontrol->value.integer = hdsp_read_gain(hdsp, addr);
+	ucontrol->value.integer.value[0] = hdsp_read_gain(hdsp, addr);
 	mtx_unlock(&hdsp->lock);
 	return 0;
 }
@@ -33,7 +33,7 @@ static int
 snd_hdsp_put_mixer(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
 	struct hdsp *hdsp = snd_kcontrol_chip(kcontrol);
-	int gain = ucontrol->value.integer;
+	int gain = ucontrol->value.integer.value[0];
 	int addr = 0; /* Simplified address calculation */
 	int change;
 

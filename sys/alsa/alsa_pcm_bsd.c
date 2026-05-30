@@ -16,6 +16,22 @@
 
 MALLOC_DECLARE(M_ALSA);
 
+static uint32_t basound_fmtlist[] = {
+	SND_FORMAT(AFMT_S32_LE, 2, 0),
+	SND_FORMAT(AFMT_S16_LE, 2, 0),
+	SND_FORMAT(AFMT_S32_LE, 1, 0),
+	SND_FORMAT(AFMT_S16_LE, 1, 0),
+	SND_FORMAT(AFMT_S32_LE, 8, 0),
+	SND_FORMAT(AFMT_S16_LE, 8, 0),
+	SND_FORMAT(AFMT_S32_LE, 18, 0),
+	SND_FORMAT(AFMT_S16_LE, 18, 0),
+	SND_FORMAT(AFMT_S32_LE, 26, 0),
+	SND_FORMAT(AFMT_S16_LE, 26, 0),
+	SND_FORMAT(AFMT_S32_LE, 32, 0),
+	SND_FORMAT(AFMT_S16_LE, 32, 0),
+	0
+};
+
 /* FreeBSD Channel Methods */
 
 static void *
@@ -81,6 +97,21 @@ basound_chan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b, struct pcm_chan
 	ch->speed = 48000;
 	ch->blocksize = 4096;
 
+	/* Initialize per-channel capabilities from ALSA constraints. */
+	ch->caps.fmtlist = basound_fmtlist;
+	ch->caps.caps = DSP_CAP_DUPLEX;
+	ch->caps.minspeed = 32000;
+	ch->caps.maxspeed = 192000;
+
+	if (substream->pstr->ops && substream->pstr->ops->open) {
+		substream->pstr->ops->open(substream);
+		if (ch->runtime->hw.rate_min > 0) {
+			ch->caps.minspeed = ch->runtime->hw.rate_min;
+			ch->caps.maxspeed = ch->runtime->hw.rate_max;
+			ch->speed = ch->caps.minspeed;
+		}
+	}
+
 	return ch;
 }
 
@@ -142,13 +173,17 @@ basound_chan_setblocksize(kobj_t obj, void *data, uint32_t blocksize)
 	/* 1. Calculate how many frames this blocksize represents */
 	frames = blocksize / (channels * bps);
 
-	/* 2. Round up to nearest supported HDSP latency (power of 2, 64 to 8192) */
-	if (frames < 64) frames = 64;
-	if (frames > 8192) frames = 8192;
-	
-	uint32_t p2frames = 64;
-	while (p2frames < frames) p2frames <<= 1;
-	frames = p2frames;
+	/* 2. Round up to nearest supported latency.
+	 * HDSP hardware strictly requires power-of-two (64 to 8192).
+	 * For other devices (USB), we allow the requested size to improve sync. */
+	if (substream->pcm->private_data != NULL) {
+		if (frames < 64) frames = 64;
+		if (frames > 8192) frames = 8192;
+		
+		uint32_t p2frames = 64;
+		while (p2frames < frames) p2frames <<= 1;
+		frames = p2frames;
+	}
 
 	/* 3. Recalculate actual blocksize */
 	blocksize = frames * channels * bps;
@@ -196,27 +231,11 @@ basound_chan_setfragments(kobj_t obj, void *data, uint32_t blocksize, uint32_t b
 	return 0;
 }
 
-static uint32_t basound_fmtlist[] = {
-	SND_FORMAT(AFMT_S32_LE, 2, 0),
-	SND_FORMAT(AFMT_S16_LE, 2, 0),
-	SND_FORMAT(AFMT_S32_LE, 1, 0),
-	SND_FORMAT(AFMT_S16_LE, 1, 0),
-	SND_FORMAT(AFMT_S32_LE, 8, 0),
-	SND_FORMAT(AFMT_S16_LE, 8, 0),
-	SND_FORMAT(AFMT_S32_LE, 18, 0),
-	SND_FORMAT(AFMT_S16_LE, 18, 0),
-	SND_FORMAT(AFMT_S32_LE, 26, 0),
-	SND_FORMAT(AFMT_S16_LE, 26, 0),
-	SND_FORMAT(AFMT_S32_LE, 32, 0),
-	SND_FORMAT(AFMT_S16_LE, 32, 0),
-	0
-};
-static struct pcmchan_caps basound_caps = {32000, 192000, basound_fmtlist, DSP_CAP_DUPLEX};
-
 static struct pcmchan_caps *
 basound_chan_getcaps(kobj_t obj, void *data)
 {
-	return &basound_caps;
+	struct basound_chan *ch = data;
+	return &ch->caps;
 }
 
 static struct pcmchan_matrix basound_matrix_18 = {
@@ -334,9 +353,22 @@ basound_chan_getptr(kobj_t obj, void *data)
 	struct basound_chan *ch = data;
 	struct snd_pcm_substream *substream = ch->substream;
 	const struct snd_pcm_ops *ops = substream->pstr->ops;
+	static uint32_t getptr_cnt = 0;
+	unsigned long frames;
+	uint32_t ptr;
 
-	if (ops && ops->pointer)
-		return (uint32_t)ops->pointer(substream);
+	if (ops && ops->pointer) {
+		frames = ops->pointer(substream);
+		/* ALSA driver returns frames, FreeBSD wants bytes.
+		 * Use the channel format (stored in basound_chan) to find frame size. */
+		uint32_t frame_bytes = AFMT_BPS(ch->format) * AFMT_CHANNEL(ch->format);
+		ptr = (uint32_t)(frames * frame_bytes);
+		
+		if (++getptr_cnt % 500 == 1)
+			printf("basound getptr #%u dir=%d frames=%lu ptr=%u\n",
+			    getptr_cnt, substream->stream, frames, ptr);
+		return ptr;
+	}
 	
 	return 0;
 }

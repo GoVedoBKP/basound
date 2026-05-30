@@ -20,6 +20,7 @@
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/malloc.h>
+#include <sys/libkern.h>
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
 #include <dev/usb/usbdi_util.h>
@@ -28,6 +29,7 @@
 
 #include <sound/core.h>
 #include <sound/pcm.h>
+#include <sound/control.h>
 #include <sound/pcm_params.h>
 #include <sound/rawmidi.h>
 #include <alsa_pcm_bsd.h>
@@ -99,6 +101,8 @@ struct line6_device_info {
 	const char *name;
 	const char *card_id;
 	unsigned int capabilities;
+	uint8_t ep_audio_r;
+	uint8_t ep_audio_w;
 };
 
 /* Line6 device database */
@@ -109,7 +113,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6POD",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI | 
-				LINE6_CAP_FIRMWARE
+				LINE6_CAP_FIRMWARE,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_PODXT,
@@ -117,7 +123,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6PODXT",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI | 
-				LINE6_CAP_FIRMWARE
+				LINE6_CAP_FIRMWARE,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_POD_XT_LIVE,
@@ -125,7 +133,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6PODXTLive",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI | 
-				LINE6_CAP_FIRMWARE
+				LINE6_CAP_FIRMWARE,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_BASS_POD_XT,
@@ -133,7 +143,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6BassPODXT",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI | 
-				LINE6_CAP_FIRMWARE
+				LINE6_CAP_FIRMWARE,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_PODHD300,
@@ -141,7 +153,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6PODHD300",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI | 
-				LINE6_CAP_FIRMWARE
+				LINE6_CAP_FIRMWARE,
+		.ep_audio_r = 0x86,
+		.ep_audio_w = 0x02
 	},
 	{
 		.product_id = LINE6_PRODUCT_PODHD400,
@@ -149,7 +163,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6PODHD400",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI | 
-				LINE6_CAP_FIRMWARE
+				LINE6_CAP_FIRMWARE,
+		.ep_audio_r = 0x86,
+		.ep_audio_w = 0x02
 	},
 	{
 		.product_id = LINE6_PRODUCT_PODHD500,
@@ -157,7 +173,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6PODHD500",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI | 
-				LINE6_CAP_FIRMWARE
+				LINE6_CAP_FIRMWARE,
+		.ep_audio_r = 0x86,
+		.ep_audio_w = 0x02
 	},
 	{
 		.product_id = LINE6_PRODUCT_PODSTUDIO_UX1,
@@ -165,7 +183,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6PODStudioUX1",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
-				LINE6_CAP_INIT_TONEPORT
+				LINE6_CAP_INIT_TONEPORT,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_PODSTUDIO_UX2,
@@ -173,7 +193,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6PODStudioUX2",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
-				LINE6_CAP_INIT_TONEPORT
+				LINE6_CAP_INIT_TONEPORT,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_TONEPORT_UX1,
@@ -181,7 +203,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6TonePortUX1",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
-				LINE6_CAP_INIT_TONEPORT
+				LINE6_CAP_INIT_TONEPORT,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_TONEPORT_UX2,
@@ -189,7 +213,9 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6TonePortUX2",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
-				LINE6_CAP_INIT_TONEPORT
+				LINE6_CAP_INIT_TONEPORT,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_TONEPORT_GX,
@@ -197,16 +223,20 @@ static const struct line6_device_info line6_devices[] = {
 		.card_id = "Line6TonePortGX",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_AUDIO_IN | 
 				LINE6_CAP_AUDIO_OUT | LINE6_CAP_MIDI |
-				LINE6_CAP_INIT_TONEPORT
+				LINE6_CAP_INIT_TONEPORT,
+		.ep_audio_r = 0x82,
+		.ep_audio_w = 0x01
 	},
 	{
 		.product_id = LINE6_PRODUCT_VARIAX,
 		.name = "Line6 Variax",
 		.card_id = "Line6Variax",
 		.capabilities = LINE6_CAP_CONTROL | LINE6_CAP_MIDI | 
-				LINE6_CAP_FIRMWARE
+				LINE6_CAP_FIRMWARE,
+		.ep_audio_r = 0,
+		.ep_audio_w = 0
 	},
-	{ 0, NULL, NULL, 0 }
+	{ 0, NULL, NULL, 0, 0, 0 }
 };
 
 struct line6_bsd_softc {
@@ -217,6 +247,8 @@ struct line6_bsd_softc {
 	void		*alsa_line6;
 	unsigned int	 capabilities;
 	const char	*device_name;
+	uint8_t		 ep_audio_r;
+	uint8_t		 ep_audio_w;
 
 	/* Audio transport */
 	struct mtx	 sc_lock;	/* serialises USB state; USB callback mutex */
@@ -232,11 +264,10 @@ MALLOC_DEFINE(M_LINE6_BSD, "line6_bsd", "Line6 BSD softc");
 /* Forward declarations for USB isochronous callbacks */
 static usb_callback_t line6_play_callback;
 static usb_callback_t line6_rec_callback;
-static usb_callback_t line6_sync_callback;
 
 /* USB isochronous config for playback (HOST → DEVICE, OUT) */
-static const struct usb_config line6_play_cfg[LINE6_NCHANBUFS + 1] = {
-	[0] = {
+static const struct usb_config line6_play_cfg[LINE6_NCHANBUFS] = {
+	[0 ... LINE6_NCHANBUFS - 1] = {
 		.type = UE_ISOCHRONOUS,
 		.endpoint = UE_ADDR_ANY,
 		.direction = UE_DIR_OUT,
@@ -245,47 +276,11 @@ static const struct usb_config line6_play_cfg[LINE6_NCHANBUFS + 1] = {
 		.flags = {.short_xfer_ok = 1},
 		.callback = &line6_play_callback,
 	},
-	[1] = {
-		.type = UE_ISOCHRONOUS,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_OUT,
-		.bufsize = 0,
-		.frames = LINE6_NFRAMES,
-		.flags = {.short_xfer_ok = 1},
-		.callback = &line6_play_callback,
-	},
-	[2] = {
-		.type = UE_ISOCHRONOUS,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_OUT,
-		.bufsize = 0,
-		.frames = LINE6_NFRAMES,
-		.flags = {.short_xfer_ok = 1},
-		.callback = &line6_play_callback,
-	},
-	[3] = {
-		.type = UE_ISOCHRONOUS,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_OUT,
-		.bufsize = 0,
-		.frames = LINE6_NFRAMES,
-		.flags = {.short_xfer_ok = 1},
-		.callback = &line6_play_callback,
-	},
-	[LINE6_NCHANBUFS] = {	/* optional sync feedback endpoint (IN) */
-		.type = UE_ISOCHRONOUS,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_IN,
-		.bufsize = 0,
-		.frames = 1,
-		.flags = {.no_pipe_ok = 1, .short_xfer_ok = 1},
-		.callback = &line6_sync_callback,
-	},
 };
 
 /* USB isochronous config for capture (DEVICE → HOST, IN) */
-static const struct usb_config line6_rec_cfg[LINE6_NCHANBUFS + 1] = {
-	[0] = {
+static const struct usb_config line6_rec_cfg[LINE6_NCHANBUFS] = {
+	[0 ... LINE6_NCHANBUFS - 1] = {
 		.type = UE_ISOCHRONOUS,
 		.endpoint = UE_ADDR_ANY,
 		.direction = UE_DIR_IN,
@@ -293,42 +288,6 @@ static const struct usb_config line6_rec_cfg[LINE6_NCHANBUFS + 1] = {
 		.frames = LINE6_NFRAMES,
 		.flags = {.short_xfer_ok = 1},
 		.callback = &line6_rec_callback,
-	},
-	[1] = {
-		.type = UE_ISOCHRONOUS,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_IN,
-		.bufsize = 0,
-		.frames = LINE6_NFRAMES,
-		.flags = {.short_xfer_ok = 1},
-		.callback = &line6_rec_callback,
-	},
-	[2] = {
-		.type = UE_ISOCHRONOUS,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_IN,
-		.bufsize = 0,
-		.frames = LINE6_NFRAMES,
-		.flags = {.short_xfer_ok = 1},
-		.callback = &line6_rec_callback,
-	},
-	[3] = {
-		.type = UE_ISOCHRONOUS,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_IN,
-		.bufsize = 0,
-		.frames = LINE6_NFRAMES,
-		.flags = {.short_xfer_ok = 1},
-		.callback = &line6_rec_callback,
-	},
-	[LINE6_NCHANBUFS] = {	/* optional sync feedback endpoint (OUT) */
-		.type = UE_ISOCHRONOUS,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_OUT,
-		.bufsize = 0,
-		.frames = 1,
-		.flags = {.no_pipe_ok = 1, .short_xfer_ok = 1},
-		.callback = &line6_sync_callback,
 	},
 };
 
@@ -361,21 +320,6 @@ line6_has_iso_endpoints(struct usb_device *udev)
 	return 0;
 }
 
-/* Sync endpoint callback: no-op (informational only) */
-static void
-line6_sync_callback(struct usb_xfer *xfer, usb_error_t error __unused)
-{
-	switch (USB_GET_STATE(xfer)) {
-	case USB_ST_SETUP:
-		usbd_xfer_set_frames(xfer, 1);
-		usbd_xfer_set_frame_len(xfer, 0, usbd_xfer_max_framelen(xfer));
-		usbd_transfer_submit(xfer);
-		break;
-	default:
-		break;
-	}
-}
-
 /*
  * USB isochronous playback callback.
  * Called with sc->sc_lock held (it is the USB transfer mutex).
@@ -401,7 +345,20 @@ line6_play_callback(struct usb_xfer *xfer, usb_error_t error)
 	switch (USB_GET_STATE(xfer)) {
 	case USB_ST_SETUP:
 		/* FALLTHROUGH */
-	case USB_ST_TRANSFERRED:
+	case USB_ST_TRANSFERRED: {
+		static uint32_t dbg_cnt = 0;
+		dbg_cnt++;
+		if (dbg_cnt % 200 == 0) {
+			const int16_t *s = (const int16_t *)st->cur;
+			printf("line6 play cb#%u start=%p cur=%p end=%p pcm_ch=%p running=%d"
+			    " samples=[%d,%d,%d,%d]\n",
+			    dbg_cnt, st->start, st->cur, st->end, st->pcm_ch, st->running,
+			    (st->cur + 8 <= st->end) ? s[0] : 0,
+			    (st->cur + 8 <= st->end) ? s[1] : 0,
+			    (st->cur + 8 <= st->end) ? s[2] : 0,
+			    (st->cur + 8 <= st->end) ? s[3] : 0);
+		}
+
 		if (!st->running || st->start == NULL || st->start == st->end)
 			break;
 
@@ -452,6 +409,7 @@ line6_play_callback(struct usb_xfer *xfer, usb_error_t error)
 		}
 		usbd_transfer_submit(xfer);
 		break;
+	}
 
 	default:	/* Error */
 		if (error != USB_ERR_CANCELLED && st->running) {
@@ -485,9 +443,20 @@ line6_rec_callback(struct usb_xfer *xfer, usb_error_t error)
 	usbd_xfer_status(xfer, &actlen, NULL, NULL, &nframes);
 
 	switch (USB_GET_STATE(xfer)) {
-	case USB_ST_TRANSFERRED:
-		if (st->start == NULL || st->start == st->end)
+	case USB_ST_TRANSFERRED: {
+		static uint32_t dbg_cnt = 0;
+		static uint32_t dbg_skip = 0;
+		dbg_cnt++;
+		if (st->start == NULL || st->start == st->end) {
+			dbg_skip++;
+			if (dbg_skip % 50 == 1)
+				printf("line6 rec cb#%u SKIP start=%p end=%p\n",
+				    dbg_cnt, st->start, st->end);
 			goto tr_setup;
+		}
+		if (dbg_cnt % 200 == 0)
+			printf("line6 rec cb#%u start=%p cur=%p end=%p pcm_ch=%p running=%d\n",
+			    dbg_cnt, st->start, st->cur, st->end, st->pcm_ch, st->running);
 
 		pc = usbd_xfer_get_frame(xfer, 0);
 		offset = 0;
@@ -510,8 +479,13 @@ line6_rec_callback(struct usb_xfer *xfer, usb_error_t error)
 			mtx_unlock(&sc->sc_lock);
 			chn_intr(st->pcm_ch);
 			mtx_lock(&sc->sc_lock);
+		} else {
+			static uint32_t null_ch_cnt = 0;
+			if (null_ch_cnt++ % 100 == 0)
+				printf("line6 rec cb#%u pcm_ch=NULL!\n", dbg_cnt);
 		}
 		/* FALLTHROUGH to re-arm */
+	}
 	case USB_ST_SETUP:
 tr_setup:
 		if (!st->running)
@@ -609,13 +583,11 @@ line6_pcm_open(struct snd_pcm_substream *substream)
 	runtime->hw.info = SNDRV_PCM_INFO_MMAP |
 			   SNDRV_PCM_INFO_MMAP_VALID |
 			   SNDRV_PCM_INFO_INTERLEAVED;
-	runtime->hw.formats = SNDRV_PCM_FMTBIT_S16_LE |
-			      SNDRV_PCM_FMTBIT_S24_3LE;
-	runtime->hw.rates = SNDRV_PCM_RATE_44100 |
-			    SNDRV_PCM_RATE_48000;
+	runtime->hw.formats = SNDRV_PCM_FMTBIT_S16_LE;
+	runtime->hw.rates = SNDRV_PCM_RATE_44100;
 	runtime->hw.rate_min = 44100;
-	runtime->hw.rate_max = 48000;
-	runtime->hw.channels_min = 1;
+	runtime->hw.rate_max = 44100;
+	runtime->hw.channels_min = 2;
 	runtime->hw.channels_max = 2;
 	runtime->hw.buffer_bytes_max = 1 << 20;
 	runtime->hw.period_bytes_min = 64;
@@ -699,6 +671,9 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		uint32_t channels, bps, sample_size;
 		uint32_t stream_bit;
 
+		printf("line6 pcm trigger START dir=%d speed=%u\n",
+		    substream->stream, ch->speed);
+
 		if (runtime->dma_area == NULL || runtime->dma_bytes == 0)
 			return -EINVAL;
 
@@ -739,8 +714,15 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		 * Set up ISO transfers now that alt endpoints are visible.
 		 * usbd_transfer_setup must NOT be called with sc_lock held.
 		 */
+		struct usb_config cfg_copy[LINE6_NCHANBUFS];
+		memcpy(cfg_copy, cfg, sizeof(cfg_copy));
+		for (int i = 0; i < LINE6_NCHANBUFS; i++) {
+			cfg_copy[i].endpoint = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+			    sc->ep_audio_w : sc->ep_audio_r;
+		}
+
 		uerr = usbd_transfer_setup(sc->usbdev, &sc->audio_iface_index,
-		    st->xfer, cfg, LINE6_NCHANBUFS + 1, st, &sc->sc_lock);
+		    st->xfer, cfg_copy, LINE6_NCHANBUFS, st, &sc->sc_lock);
 		if (uerr != 0) {
 			device_printf(sc->dev,
 			    "transfer setup failed: %s\n", usbd_errstr(uerr));
@@ -768,6 +750,19 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		st->pcm_ch = ch->channel;
 		st->running = 1;
 
+		/* Diagnostic: check if PCM pre-filled the ring before USB starts */
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+			const uint8_t *d = st->start;
+			uint32_t nonzero = 0;
+			for (int i = 0; i < (int)runtime->dma_bytes && i < 1024; i++)
+				if (d[i]) nonzero++;
+			printf("line6 trigger: dma_area=%p dma_bytes=%u "
+			    "nonzero_in_first_1024=%u "
+			    "bytes=[%02x %02x %02x %02x %02x %02x %02x %02x]\n",
+			    runtime->dma_area, (unsigned)runtime->dma_bytes, nonzero,
+			    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+		}
+
 		for (int i = 0; i < LINE6_NCHANBUFS; i++)
 			usbd_transfer_start(st->xfer[i]);
 		mtx_unlock(&sc->sc_lock);
@@ -782,15 +777,17 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		uint32_t stream_bit = (substream->stream ==
 		    SNDRV_PCM_STREAM_PLAYBACK) ? 1 : 2;
 
+		printf("line6 pcm trigger STOP dir=%d\n", substream->stream);
+
 		mtx_lock(&sc->sc_lock);
 		st->running = 0;
 		sc->audio_active &= ~stream_bit;
-		for (int i = 0; i < LINE6_NCHANBUFS + 1; i++)
+		for (int i = 0; i < LINE6_NCHANBUFS; i++)
 			usbd_transfer_stop(st->xfer[i]);
 		mtx_unlock(&sc->sc_lock);
 
 		/* Must be called without sc_lock held */
-		usbd_transfer_unsetup(st->xfer, LINE6_NCHANBUFS + 1);
+		usbd_transfer_unsetup(st->xfer, LINE6_NCHANBUFS);
 
 		/* Release ISO bandwidth only when both streams are stopped */
 		if (sc->audio_active == 0)
@@ -813,8 +810,16 @@ line6_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		    sc->audio_iface_index, LINE6_ALT_AUDIO);
 		if (uerr != 0)
 			return -EIO;
+
+		struct usb_config cfg_copy[LINE6_NCHANBUFS];
+		memcpy(cfg_copy, cfg, sizeof(cfg_copy));
+		for (int i = 0; i < LINE6_NCHANBUFS; i++) {
+			cfg_copy[i].endpoint = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+			    sc->ep_audio_w : sc->ep_audio_r;
+		}
+
 		uerr = usbd_transfer_setup(sc->usbdev, &sc->audio_iface_index,
-		    st->xfer, cfg, LINE6_NCHANBUFS + 1, st, &sc->sc_lock);
+		    st->xfer, cfg_copy, LINE6_NCHANBUFS, st, &sc->sc_lock);
 		if (uerr != 0) {
 			if (sc->audio_active == 0)
 				(void)usbd_set_alt_interface_index(sc->usbdev,
@@ -841,10 +846,13 @@ line6_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	struct line6_bsd_softc *sc;
 	struct line6_audio_stream *st;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	unsigned long bytes;
 
 	if (substream == NULL || substream->pcm == NULL ||
 	    substream->pcm->card == NULL ||
-	    substream->pcm->card->dev == NULL)
+	    substream->pcm->card->dev == NULL ||
+	    runtime == NULL)
 		return 0;
 
 	sc = __containerof(substream->pcm->card->dev,
@@ -853,10 +861,16 @@ line6_pcm_pointer(struct snd_pcm_substream *substream)
 	st = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
 	    &sc->play : &sc->rec;
 
-	if (st->start == NULL || st->cur == NULL)
+	if (st->start == NULL || st->cur == NULL || st->pcm_ch == NULL)
 		return 0;
 
-	return (unsigned long)(st->cur - st->start);
+	bytes = (unsigned long)(st->cur - st->start);
+
+	/* Convert bytes to frames for ALSA shim */
+	uint32_t frame_bytes = AFMT_BPS(st->pcm_ch->format) * AFMT_CHANNEL(st->pcm_ch->format);
+	if (frame_bytes == 0)
+		return 0;
+	return (unsigned long)(bytes / frame_bytes);
 }
 
 static const struct snd_pcm_ops line6_pcm_ops = {
@@ -868,6 +882,44 @@ static const struct snd_pcm_ops line6_pcm_ops = {
 	.prepare = line6_pcm_prepare,
 	.trigger = line6_pcm_trigger,
 	.pointer = line6_pcm_pointer,
+};
+
+/*
+ * ALSA-style volume controls for Line6 devices.
+ * The Linux driver applies volume purely in software (change_volume() in
+ * playback.c scales PCM samples before sending to USB).  The UX1 has no
+ * documented vendor-register for PCM or monitor volume, so we follow Linux
+ * and handle volume at the PCM software layer only.
+ */
+static int
+line6_control_pcm_put(struct snd_kcontrol *kctl, struct snd_ctl_elem_value *ucontrol)
+{
+	/* Volume is applied by the PCM software-mixing layer; nothing to do here. */
+	(void)kctl;
+	(void)ucontrol;
+	return 1;
+}
+
+static int
+line6_control_monitor_put(struct snd_kcontrol *kctl, struct snd_ctl_elem_value *ucontrol)
+{
+	/* Monitor volume is software-only; no USB vendor command needed. */
+	(void)kctl;
+	(void)ucontrol;
+	return 1;
+}
+
+static struct snd_kcontrol_new line6_controls[] = {
+	{
+		.name = "PCM Playback Volume",
+		.count = 2,
+		.put = line6_control_pcm_put,
+	},
+	{
+		.name = "Monitor Playback Volume",
+		.count = 2,
+		.put = line6_control_monitor_put,
+	},
 };
 
 /* USB device probe routine */
@@ -935,6 +987,8 @@ line6_bsd_attach(device_t dev)
 
 	sc->capabilities = info->capabilities;
 	sc->device_name = info->name;
+	sc->ep_audio_r = info->ep_audio_r;
+	sc->ep_audio_w = info->ep_audio_w;
 	sc->alsa_dev.bsddev = dev;
 
 	mtx_init(&sc->sc_lock, "line6_lock", NULL, MTX_DEF);
@@ -969,15 +1023,16 @@ line6_bsd_attach(device_t dev)
 		ticks = (uint32_t)ts.tv_sec;
 		line6_write_data(sc->usbdev, 0x80c6, &ticks, 4);
 
-		/* Select input source: Microphone (0x0a01) */
-		line6_send_cmd(sc->usbdev, 0x0a01, 0x0000);
-
+		/* 1. Enable device */
 		err = line6_send_cmd(sc->usbdev, 0x0301, 0x0000);
 		if (err != 0) {
 			device_printf(dev, "Initialization (0x0301) failed: %s\n",
 			    usbd_errstr(err));
 		} else {
 			device_printf(dev, "Device enabled (0x0301 success)\n");
+
+			/* 2. Select input source: Microphone (0x0a01) */
+			line6_send_cmd(sc->usbdev, 0x0a01, 0x0000);
 		}
 	}
 
@@ -992,6 +1047,11 @@ line6_bsd_attach(device_t dev)
 	if (err < 0 || card == NULL) {
 		device_printf(dev, "Failed to create sound card: %d\n", err);
 		goto fail;
+	}
+
+	/* Register hardware volume controls to ALSA card */
+	for (int i = 0; i < nitems(line6_controls); i++) {
+		snd_ctl_add(card, snd_ctl_new1(&line6_controls[i], sc));
 	}
 
 	/* Set card properties */

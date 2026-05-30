@@ -13,6 +13,7 @@ struct basound_chan {
 	uint32_t format;
 	uint32_t speed;
 	uint32_t blocksize;
+	struct pcmchan_caps caps;
 };
 
 #endif /* _ALSA_PCM_BSD_H_ */

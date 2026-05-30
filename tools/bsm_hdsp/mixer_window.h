@@ -66,7 +66,6 @@ private:
 	/* Mixer tab (main) */
 	Fl_Group  *tab_mixer_;
 	Fl_Scroll *mix_scroll_;
-	Fl_Group  *mix_content_;              /* content wrapper inside mix_scroll_ */
 	std::vector<MixerStrip *> mix_pcm_;   /* PCM / playback strips */
 	std::vector<MixerStrip *> mix_in_;    /* physical input strips */
 	std::vector<MixerStrip *> mix_out_;   /* physical output strips */
@@ -81,7 +80,6 @@ private:
 	/* Meters tab */
 	Fl_Group      *tab_meters_;
 	Fl_Scroll     *meter_scroll_;
-	Fl_Group      *meter_content_;        /* content wrapper inside meter_scroll_ */
 	std::vector<VuMeter *> vu_in_;
 	std::vector<VuMeter *> vu_pb_;
 	std::vector<VuMeter *> vu_out_;

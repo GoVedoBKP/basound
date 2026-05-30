@@ -34,10 +34,10 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
     : Fl_Double_Window(win_w, win_h, title),
       connected_(false),
       menu_(nullptr), tabs_(nullptr),
-      tab_mixer_(nullptr), mix_scroll_(nullptr), mix_content_(nullptr),
+      tab_mixer_(nullptr), mix_scroll_(nullptr),
       tab_matrix_(nullptr), matrix_(nullptr),
       cell_fader_(nullptr), cell_label_(nullptr), cell_db_(nullptr),
-      tab_meters_(nullptr), meter_scroll_(nullptr), meter_content_(nullptr),
+      tab_meters_(nullptr), meter_scroll_(nullptr),
       status_bar_(nullptr),
       selected_addr_(0)
 {
@@ -67,8 +67,6 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 			mix_scroll_ = new Fl_Scroll(0, ty, tw, th);
 			mix_scroll_->type(Fl_Scroll::BOTH);
 			mix_scroll_->color(fl_rgb_color(30, 30, 30));
-			mix_scroll_->begin();
-			mix_scroll_->end();
 		}
 		tab_mixer_->resizable(mix_scroll_);
 		tab_mixer_->end();
@@ -103,8 +101,8 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 
 				cell_fader_ = new Fl_Slider(px, py, pw, th - 120);
 				cell_fader_->type(FL_VERT_NICE_SLIDER);
-					cell_fader_->bounds(1.0, 0.0);  /* top=1.0=unity, bottom=0.0=silence */
-					cell_fader_->value(1.0);
+				cell_fader_->bounds(1.0, 0.0);  /* top=1.0=unity, bottom=0.0=silence */
+				cell_fader_->value(1.0);
 				cell_fader_->color(fl_rgb_color(60, 60, 60));
 				cell_fader_->selection_color(fl_rgb_color(80, 160, 80));
 				cell_fader_->callback(fader_cb, this);
@@ -117,6 +115,7 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 			}
 			panel->end();
 		}
+		tab_matrix_->resizable(matrix_);
 		tab_matrix_->end();
 
 		/* --- Meters tab --- */
@@ -126,10 +125,8 @@ MixerWindow::MixerWindow(int win_w, int win_h, const char *title)
 		tab_meters_->begin();
 		{
 			meter_scroll_ = new Fl_Scroll(0, ty, tw, th);
+			meter_scroll_->type(Fl_Scroll::HORIZONTAL);
 			meter_scroll_->color(fl_rgb_color(30, 30, 30));
-			meter_scroll_->begin();
-			/* VU meters populated in build_ui() */
-			meter_scroll_->end();
 		}
 		tab_meters_->resizable(meter_scroll_);
 		tab_meters_->end();
@@ -270,20 +267,16 @@ void MixerWindow::build_ui() {
 	int y_cur = mix_scroll_->y() + 4;
 
 	mix_scroll_->begin();
-	int content_w = std::max(mix_scroll_->w(), (nch + 2) * kStripW + 8);
-	mix_content_ = new Fl_Group(mix_scroll_->x(), mix_scroll_->y(),
-	    content_w, 4000);
-	mix_content_->begin();
+	/* Note: headers use full calculated width to ensure background fills horizontally */
+	int section_w = std::max(mix_scroll_->w(), (nch + 2) * kStripW + 8);
 
 	build_mix_section("PCM Outputs (playback)", nch,     0, mix_pcm_,
-	    mx0, content_w, y_cur, fl_rgb_color(80, 160, 80));
+	    mx0, section_w, y_cur, fl_rgb_color(80, 160, 80));
 	build_mix_section("Physical Inputs",         nch,     1, mix_in_,
-	    mx0, content_w, y_cur, fl_rgb_color(180, 130, 60));
+	    mx0, section_w, y_cur, fl_rgb_color(180, 130, 60));
 	build_mix_section("Physical Outputs",        nch + 2, 2, mix_out_,
-	    mx0, content_w, y_cur, fl_rgb_color(80, 120, 200));
+	    mx0, section_w, y_cur, fl_rgb_color(80, 120, 200));
 
-	mix_content_->size(mix_content_->w(), y_cur - mix_content_->y() + 4);
-	mix_content_->end();
 	mix_scroll_->end();
 	mix_scroll_->redraw();
 
@@ -294,10 +287,6 @@ void MixerWindow::build_ui() {
 	int mx_x = meter_scroll_->x() + 5;
 
 	meter_scroll_->begin();
-	meter_content_ = new Fl_Group(meter_scroll_->x(), meter_scroll_->y(),
-	    meter_scroll_->w(), 4000);
-	meter_content_->begin();
-
 	auto add_section = [&](const char *title, int count,
 	    std::vector<VuMeter *> &vec, Fl_Color lbl_col)
 	{
@@ -323,8 +312,6 @@ void MixerWindow::build_ui() {
 	add_section("Playback (DAW out)", nch, vu_pb_,  fl_rgb_color(80, 160, 80));
 	add_section("Hardware Outputs",   nch + 2, vu_out_, fl_rgb_color(80, 120, 200));
 
-	meter_content_->size(meter_content_->w(), my - meter_content_->y() + 4);
-	meter_content_->end();
 	meter_scroll_->end();
 	meter_scroll_->redraw();
 }
@@ -333,25 +320,21 @@ void MixerWindow::clear_meters() {
 	vu_in_.clear();
 	vu_pb_.clear();
 	vu_out_.clear();
-	if (meter_content_) {
-		meter_scroll_->remove(*meter_content_);  /* 3->2 children, safe */
-		delete meter_content_;
-		meter_content_ = nullptr;
+	if (meter_scroll_) {
+		meter_scroll_->clear();
 	}
 }
 
 void MixerWindow::clear_mix_strips() {
-	/* Delete strip descriptors; widget memory owned by mix_content_ */
+	/* Delete strip descriptors; widget memory owned by mix_scroll_ */
 	for (auto *s : mix_pcm_) delete s;
 	for (auto *s : mix_in_)  delete s;
 	for (auto *s : mix_out_) delete s;
 	mix_pcm_.clear();
 	mix_in_.clear();
 	mix_out_.clear();
-	if (mix_content_) {
-		mix_scroll_->remove(*mix_content_);  /* 3->2 children, safe */
-		delete mix_content_;
-		mix_content_ = nullptr;
+	if (mix_scroll_) {
+		mix_scroll_->clear();
 	}
 }
 
@@ -501,7 +484,7 @@ void MixerWindow::build_mix_section(
 	hdr->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 	y_cur += kSHdrH;
 
-const int fader_w = kStripW - kSVuW - 6;  /* 60-22-6 = 32 */
+	const int fader_w = kStripW - kSVuW - 6;  /* 60-22-6 = 32 */
 
 	for (int i = 0; i < count; ++i) {
 		int sx = x0 + i * kStripW;
@@ -526,19 +509,17 @@ const int fader_w = kStripW - kSVuW - 6;  /* 60-22-6 = 32 */
 		ch_lbl->labelsize(9);
 		sy += kSLabelH;
 
-		/* VU meter */
-s->vu = new VuMeter(sx, sy, kSVuW, kSSlotH);
+		/* VU (left) and fader (right), same height */
+		s->vu = new VuMeter(sx, sy, kSVuW, kSSlotH);
 
-
-/* VU (left) and fader (right), same height */
-int fx = sx + kSVuW + 4;
-s->fader = new Fl_Slider(fx, sy, fader_w, kSSlotH);
+		int fx = sx + kSVuW + 4;
+		s->fader = new Fl_Slider(fx, sy, fader_w, kSSlotH);
 		s->fader->type(FL_VERT_NICE_SLIDER);
-s->fader->bounds(1.0, 0.0);  /* top=1.0=unity, bottom=0.0=silence */
+		s->fader->bounds(1.0, 0.0);  /* top=1.0=unity, bottom=0.0=silence */
 
 		if (addr >= 0) {
-			double init = (double)matrix_->get_gain((uint32_t)addr)
-			    / HDSP_GAIN_UNITY;
+			uint16_t gain = matrix_->get_gain((uint32_t)addr);
+			double init = (double)gain / HDSP_GAIN_UNITY;
 			s->fader->value(init);
 			s->fader->color(fl_rgb_color(60, 60, 60));
 			s->fader->selection_color(fl_rgb_color(80, 160, 80));
@@ -550,9 +531,8 @@ s->fader->bounds(1.0, 0.0);  /* top=1.0=unity, bottom=0.0=silence */
 			s->fader->deactivate();
 		}
 
-
 		/* dB readout */
-s->db_label = new Fl_Box(sx, sy + kSSlotH, kStripW, kSDbH);
+		s->db_label = new Fl_Box(sx, sy + kSSlotH, kStripW, kSDbH);
 		s->db_label->labelcolor(fl_rgb_color(150, 150, 150));
 		s->db_label->labelsize(8);
 		if (addr >= 0) {
@@ -573,7 +553,7 @@ s->db_label = new Fl_Box(sx, sy + kSSlotH, kStripW, kSDbH);
 		vec.push_back(s);
 	}
 
-y_cur += kSLabelH + kSSlotH + kSDbH + kSGapH;
+	y_cur += kSLabelH + kSSlotH + kSDbH + kSGapH;
 }
 
 /* ------------------------------------------------------------------ */

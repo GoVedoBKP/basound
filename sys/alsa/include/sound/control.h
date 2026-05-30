@@ -14,9 +14,11 @@ struct snd_ctl_elem_info {
 struct snd_ctl_elem_value {
 	union {
 		struct {
+			int value[128];
+		} integer;
+		struct {
 			unsigned char status[24];
 		} iec958;
-		int integer;
 	} value;
 };
 
